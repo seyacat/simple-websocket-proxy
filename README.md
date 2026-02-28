@@ -68,16 +68,57 @@ ws://localhost:4001/?uuid=TU_UUID
 ```json
 {
   "type": "set_mode",
-  "mode": "host"  // o "guest"
+  "mode": "host",  // o "guest"
+  "visibility": "public"  // opcional: "public" o "private" (solo para hosts, por defecto "private")
+}
+```
+
+Respuesta para host:
+```json
+{
+  "type": "mode_set",
+  "mode": "host",
+  "visibility": "public",
+  "message": "Modo cambiado a host (public)",
+  "timestamp": "2026-02-28T05:00:00.000Z"
+}
+```
+
+Respuesta para guest:
+```json
+{
+  "type": "mode_set",
+  "mode": "guest",
+  "message": "Modo cambiado a guest",
+  "timestamp": "2026-02-28T05:00:00.000Z"
+}
+```
+
+#### Listar hosts públicos
+```json
+{
+  "type": "list_public_hosts"
 }
 ```
 
 Respuesta:
 ```json
 {
-  "type": "mode_set",
-  "mode": "host",
-  "message": "Modo cambiado a host",
+  "type": "public_hosts_list",
+  "hosts": [
+    {
+      "shortToken": "ABC123",
+      "subscribersCount": 3,
+      "visibility": "public"
+    },
+    {
+      "shortToken": "DEF456",
+      "subscribersCount": 0,
+      "visibility": "public"
+    }
+  ],
+  "count": 2,
+  "maxPublicHosts": 20,
   "timestamp": "2026-02-28T05:00:00.000Z"
 }
 ```
@@ -187,6 +228,9 @@ Respuesta:
 4. **Broadcast automático**: Cuando un host envía un mensaje a su propio token, se envía a todos sus subscribers
 5. **Limpieza automática**: Al cambiar de modo o desconectarse, se limpian las suscripciones automáticamente
 6. **Tokens temporales**: Los tokens se liberan después de 10 minutos de inactividad
+7. **Hosts públicos/privados**: Los hosts pueden ser públicos (aparecen en la lista de hosts públicos) o privados (solo accesibles con su token)
+8. **Lista FIFO de hosts públicos**: Se mantiene una lista de los últimos 20 hosts públicos en orden FIFO (First-In, First-Out)
+9. **Visibilidad por defecto**: Los hosts son privados por defecto a menos que se especifique `"visibility": "public"`
 
 ## Ejemplo de flujo
 
@@ -280,6 +324,7 @@ PORT=4001
 - `tokenManager.js` - Gestión de tokens cortos
 - `testToken.js` - Tests del sistema de tokens
 - `testSubscription.js` - Tests del sistema de modos y suscripciones
+- `testPublicHosts.js` - Tests de hosts públicos/privados
 - `package.json` - Dependencias y scripts
 
 ## Dependencias

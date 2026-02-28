@@ -7,8 +7,12 @@ const tokenManager = require('./tokenManager');
 // Configuración
 const PORT = parseInt(process.env.PORT) || 4001;
 
-// Almacenar conexiones activas: uuid -> {ws, ip, shortToken, mode, subscribedTo, subscribers}
+// Almacenar conexiones activas: uuid -> {ws, ip, shortToken, mode, subscribedTo, subscribers, visibility}
 const activeConnections = new Map();
+
+// Almacenar hosts públicos en orden FIFO (máximo 20)
+const publicHosts = [];
+const MAX_PUBLIC_HOSTS = 20;
 
 // Convertir IP a base64 sin padding
 function ipToBase64(ip) {
@@ -37,8 +41,38 @@ function getConnectionByShortToken(shortToken) {
     return activeConnections.get(uuid);
 }
 
-// Establecer modo de un cliente
-function setClientMode(uuid, mode) {
+// Agregar host a la lista de hosts públicos (FIFO)
+function addToPublicHosts(shortToken) {
+    // Remover si ya existe para evitar duplicados
+    const existingIndex = publicHosts.indexOf(shortToken);
+    if (existingIndex !== -1) {
+        publicHosts.splice(existingIndex, 1);
+    }
+    
+    // Agregar al final
+    publicHosts.push(shortToken);
+    
+    // Mantener solo los últimos MAX_PUBLIC_HOSTS
+    if (publicHosts.length > MAX_PUBLIC_HOSTS) {
+        publicHosts.shift(); // Remover el más antiguo
+    }
+}
+
+// Remover host de la lista de hosts públicos
+function removeFromPublicHosts(shortToken) {
+    const index = publicHosts.indexOf(shortToken);
+    if (index !== -1) {
+        publicHosts.splice(index, 1);
+    }
+}
+
+// Obtener lista de hosts públicos (últimos 20 en orden FIFO)
+function getPublicHosts() {
+    return [...publicHosts]; // Devolver copia
+}
+
+// Establecer modo de un cliente con visibilidad opcional
+function setClientMode(uuid, mode, visibility = 'private') {
     const conn = activeConnections.get(uuid);
     if (!conn) return false;
     
@@ -50,16 +84,29 @@ function setClientMode(uuid, mode) {
         // Si era host, notificar a todos los subscribers que se desconectó
         notifyHostDisconnection(conn.shortToken);
         conn.subscribers.clear();
+        
+        // Remover de la lista de hosts públicos si estaba
+        removeFromPublicHosts(conn.shortToken);
     }
     
     // Establecer nuevo modo
     conn.mode = mode;
     
-    // Limpiar estado relacionado con el modo anterior
-    if (mode === 'guest') {
-        conn.subscribers.clear(); // Guests no tienen subscribers
-    } else if (mode === 'host') {
+    // Establecer visibilidad si es host
+    if (mode === 'host') {
+        conn.visibility = visibility;
         conn.subscribedTo = null; // Hosts no están suscritos a nadie
+        
+        // Si es público, agregar a la lista
+        if (visibility === 'public') {
+            addToPublicHosts(conn.shortToken);
+        }
+    } else {
+        conn.visibility = null;
+        // Limpiar estado relacionado con el modo anterior
+        if (mode === 'guest') {
+            conn.subscribers.clear(); // Guests no tienen subscribers
+        }
     }
     
     return true;
@@ -168,18 +215,32 @@ const server = http.createServer((req, res) => {
         let guestCount = 0;
         let noModeCount = 0;
         let totalSubscriptions = 0;
+        let publicHostCount = 0;
         const hostsWithSubscribers = [];
+        const publicHostsInfo = [];
         
         for (const [uuid, conn] of activeConnections) {
             if (conn.mode === 'host') {
                 hostCount++;
                 const subscriberCount = conn.subscribers.size;
                 totalSubscriptions += subscriberCount;
+                
+                // Contar hosts públicos
+                if (conn.visibility === 'public') {
+                    publicHostCount++;
+                    publicHostsInfo.push({
+                        shortToken: conn.shortToken,
+                        subscribersCount: subscriberCount,
+                        visibility: conn.visibility
+                    });
+                }
+                
                 if (subscriberCount > 0) {
                     hostsWithSubscribers.push({
                         shortToken: conn.shortToken,
                         subscribers: Array.from(conn.subscribers),
-                        subscriberCount: subscriberCount
+                        subscriberCount: subscriberCount,
+                        visibility: conn.visibility || 'private'
                     });
                 }
             } else if (conn.mode === 'guest') {
@@ -203,8 +264,11 @@ const server = http.createServer((req, res) => {
                 guests: guestCount,
                 noMode: noModeCount,
                 totalSubscriptions: totalSubscriptions,
-                hostsWithSubscribers: hostsWithSubscribers
+                publicHosts: publicHostCount,
+                hostsWithSubscribers: hostsWithSubscribers,
+                publicHostsList: publicHostsInfo
             },
+            publicHostsFifo: getPublicHosts(),
             timestamp: new Date().toISOString()
         }));
         return;
@@ -272,12 +336,14 @@ wss.on('connection', (ws, req) => {
         // Para reconexión, obtener el token corto existente
         shortToken = tokenManager.getShortTokenByUuid(finalUuid);
         if (!shortToken) {
-            console.log(`No se encontró token corto para UUID: ${finalUuid}`);
-            ws.close();
-            return;
+            // Si no hay token corto existente, asignar uno nuevo
+            console.log(`No se encontró token corto para UUID: ${finalUuid}, asignando nuevo token`);
+            shortToken = tokenManager.assignShortToken(finalUuid, clientIp);
+            console.log(`Nuevo token corto asignado para reconexión: ${shortToken}`);
+        } else {
+            // Actualizar actividad del token corto existente
+            tokenManager.updateShortTokenActivity(shortToken);
         }
-        // Actualizar actividad del token corto
-        tokenManager.updateShortTokenActivity(shortToken);
     } else {
         // Para nueva conexión, asignar nuevo token corto
         shortToken = tokenManager.assignShortToken(finalUuid, clientIp);
@@ -292,7 +358,8 @@ wss.on('connection', (ws, req) => {
         uuid: finalUuid,
         mode: null, // 'host', 'guest', o null
         subscribedTo: null, // para guests: token corto del host al que están suscritos
-        subscribers: new Set() // para hosts: conjunto de tokens cortos de guests suscritos
+        subscribers: new Set(), // para hosts: conjunto de tokens cortos de guests suscritos
+        visibility: null // 'public' o 'private' para hosts, null para guests
     });
 
     // Asociar el UUID y token corto con el WebSocket
@@ -318,7 +385,7 @@ wss.on('connection', (ws, req) => {
             // Actualizar actividad del token corto
             tokenManager.updateShortTokenActivity(shortToken);
             
-            // Manejar mensajes de tipo especial (set_mode, subscribe, unsubscribe)
+            // Manejar mensajes de tipo especial (set_mode, subscribe, unsubscribe, list_public_hosts)
             if (message.type === 'set_mode') {
                 handleSetModeMessage(ws, message);
                 return;
@@ -327,6 +394,9 @@ wss.on('connection', (ws, req) => {
                 return;
             } else if (message.type === 'unsubscribe') {
                 handleUnsubscribeMessage(ws);
+                return;
+            } else if (message.type === 'list_public_hosts') {
+                handleListPublicHostsMessage(ws);
                 return;
             }
             
@@ -421,15 +491,33 @@ wss.on('connection', (ws, req) => {
             return;
         }
         
-        const success = setClientMode(uuid, mode);
+        // Obtener visibilidad (solo aplica para hosts, por defecto 'private')
+        let visibility = message.visibility;
+        if (mode === 'host') {
+            if (visibility !== 'public' && visibility !== 'private') {
+                visibility = 'private'; // Valor por defecto
+            }
+        } else {
+            visibility = null; // Guests no tienen visibilidad
+        }
+        
+        const success = setClientMode(uuid, mode, visibility);
         if (success) {
-            ws.send(JSON.stringify({
+            const response = {
                 type: 'mode_set',
                 mode: mode,
                 message: `Modo cambiado a ${mode}`,
                 timestamp: new Date().toISOString()
-            }));
-            console.log(`Cliente ${ws.shortToken} cambió a modo ${mode}`);
+            };
+            
+            // Incluir visibilidad en la respuesta si es host
+            if (mode === 'host') {
+                response.visibility = visibility;
+                response.message = `Modo cambiado a ${mode} (${visibility})`;
+            }
+            
+            ws.send(JSON.stringify(response));
+            console.log(`Cliente ${ws.shortToken} cambió a modo ${mode}${mode === 'host' ? ` (${visibility})` : ''}`);
         } else {
             ws.send(JSON.stringify({
                 type: 'error',
@@ -522,6 +610,33 @@ wss.on('connection', (ws, req) => {
             }));
         }
     }
+    
+    function handleListPublicHostsMessage(ws) {
+        const publicHostsList = getPublicHosts();
+        
+        // Obtener información adicional de cada host público
+        const hostsInfo = [];
+        for (const shortToken of publicHostsList) {
+            const hostConn = getConnectionByShortToken(shortToken);
+            if (hostConn && hostConn.mode === 'host') {
+                hostsInfo.push({
+                    shortToken: shortToken,
+                    subscribersCount: hostConn.subscribers.size,
+                    visibility: hostConn.visibility || 'private'
+                });
+            }
+        }
+        
+        ws.send(JSON.stringify({
+            type: 'public_hosts_list',
+            hosts: hostsInfo,
+            count: hostsInfo.length,
+            maxPublicHosts: MAX_PUBLIC_HOSTS,
+            timestamp: new Date().toISOString()
+        }));
+        
+        console.log(`Cliente ${ws.shortToken} solicitó lista de hosts públicos (${hostsInfo.length} hosts)`);
+    }
 
     // Manejar cierre de conexión
     ws.on('close', () => {
@@ -546,6 +661,9 @@ wss.on('connection', (ws, req) => {
             } else if (conn.mode === 'host') {
                 // Host desconectado: notificar a todos los subscribers
                 notifyHostDisconnection(conn.shortToken);
+                
+                // Remover de la lista de hosts públicos si estaba
+                removeFromPublicHosts(conn.shortToken);
             }
             
             activeConnections.delete(uuid);
