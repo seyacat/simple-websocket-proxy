@@ -7,12 +7,25 @@ const tokenManager = require('./tokenManager');
 // Configuración
 const PORT = parseInt(process.env.PORT) || 4001;
 
-// Almacenar conexiones activas: token -> {ws, ip, uuid}
+// Almacenar conexiones activas: uuid -> {ws, ip, shortToken}
 const activeConnections = new Map();
 
-// Convertir IP a base64 sin padding (mantenido para compatibilidad)
+// Convertir IP a base64 sin padding
 function ipToBase64(ip) {
     return Buffer.from(ip).toString('base64').replace(/=/g, '');
+}
+
+// Generar un UUID único que comience con la IP en base64
+function generateUuid(ip) {
+    const ipBase64 = ipToBase64(ip);
+    const uniquePart = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+    return ipBase64 + '_' + uniquePart;
+}
+
+// Validar si un UUID es válido para una IP dada
+function isValidUuidForIp(uuid, ip) {
+    const ipBase64 = ipToBase64(ip);
+    return uuid.startsWith(ipBase64 + '_');
 }
 
 // Crear servidor HTTP
@@ -24,17 +37,17 @@ const server = http.createServer((req, res) => {
             status: 'online',
             activeConnections: activeConnections.size,
             tokenStats: tokenManager.getStats(),
-            activeTokens: tokenManager.getAllActiveTokens(),
+            activeShortTokens: tokenManager.getAllActiveShortTokens(),
             timestamp: new Date().toISOString()
         }));
         return;
     }
     
-    // Ruta para ver tokens activos
+    // Ruta para ver tokens cortos activos
     if (req.url === '/tokens' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-            activeTokens: tokenManager.getAllActiveTokens(),
+            activeShortTokens: tokenManager.getAllActiveShortTokens(),
             stats: tokenManager.getStats(),
             timestamp: new Date().toISOString()
         }));
@@ -54,80 +67,86 @@ wss.on('connection', (ws, req) => {
     const clientIp = req.socket.remoteAddress || '0.0.0.0';
     console.log(`Nueva conexión desde IP: ${clientIp}`);
 
-    // Parsear query string para obtener token
+    // Parsear query string para obtener uuid
     const parsedUrl = url.parse(req.url, true);
     const query = parsedUrl.query;
-    let token = query.token || null;
+    let uuid = query.uuid || null;
 
-    let finalToken;
+    let finalUuid;
     let isReconnection = false;
 
-    if (token) {
-        // Validar el token proporcionado
-        if (!tokenManager.isValidTokenForIp(token, clientIp)) {
-            console.log(`Token inválido para IP ${clientIp}: ${token}`);
+    if (uuid) {
+        // Validar el UUID proporcionado
+        if (!isValidUuidForIp(uuid, clientIp)) {
+            console.log(`UUID inválido para IP ${clientIp}: ${uuid}`);
             ws.close();
             return;
         }
         
-        // Verificar si el token ya está en uso (conexión activa)
-        if (activeConnections.has(token)) {
-            console.log(`Token ya en uso: ${token}`);
+        // Verificar si el UUID ya está en uso (conexión activa)
+        if (activeConnections.has(uuid)) {
+            console.log(`UUID ya en uso: ${uuid}`);
             ws.close();
             return;
         }
         
-        finalToken = token;
+        finalUuid = uuid;
         isReconnection = true;
-        console.log(`Reconexión con token existente: ${finalToken}`);
-        
-        // Actualizar actividad del token
-        tokenManager.updateTokenActivity(finalToken);
+        console.log(`Reconexión con UUID existente: ${finalUuid}`);
     } else {
-        // Generar nuevo token
-        // Primero necesitamos un UUID temporal para asignar el token
-        const tempUuid = ipToBase64(clientIp) + '_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
-        finalToken = tokenManager.assignToken(tempUuid, clientIp);
-        console.log(`Nuevo token generado: ${finalToken}`);
+        // Generar nuevo UUID
+        finalUuid = generateUuid(clientIp);
+        console.log(`Nuevo UUID generado: ${finalUuid}`);
     }
 
-    // Obtener información del token
-    const tokenInfo = tokenManager.getTokenInfo(finalToken);
-    if (!tokenInfo) {
-        console.log(`Error: No se pudo obtener información del token ${finalToken}`);
-        ws.close();
-        return;
+    // Asignar o recuperar token corto
+    let shortToken;
+    if (isReconnection) {
+        // Para reconexión, obtener el token corto existente
+        shortToken = tokenManager.getShortTokenByUuid(finalUuid);
+        if (!shortToken) {
+            console.log(`No se encontró token corto para UUID: ${finalUuid}`);
+            ws.close();
+            return;
+        }
+        // Actualizar actividad del token corto
+        tokenManager.updateShortTokenActivity(shortToken);
+    } else {
+        // Para nueva conexión, asignar nuevo token corto
+        shortToken = tokenManager.assignShortToken(finalUuid, clientIp);
+        console.log(`Nuevo token corto asignado: ${shortToken}`);
     }
 
     // Almacenar la conexión
-    activeConnections.set(finalToken, {
+    activeConnections.set(finalUuid, {
         ws: ws,
         ip: clientIp,
-        uuid: tokenInfo.uuid,
-        token: finalToken
+        shortToken: shortToken,
+        uuid: finalUuid
     });
 
-    // Asociar el token con el WebSocket
-    ws.token = finalToken;
-    ws.uuid = tokenInfo.uuid;
+    // Asociar el UUID y token corto con el WebSocket
+    ws.uuid = finalUuid;
+    ws.shortToken = shortToken;
 
-    // Enviar el token al cliente
+    // Enviar información al cliente
     ws.send(JSON.stringify({
-        type: 'token_assigned',
-        token: finalToken,
+        type: 'connection_established',
+        uuid: finalUuid,
+        shortToken: shortToken,
         isReconnection: isReconnection,
         message: isReconnection ? 'Reconexión exitosa' : 'Nueva conexión establecida'
     }));
 
-    console.log(`Cliente conectado con token: ${finalToken}. Total activos: ${activeConnections.size}`);
+    console.log(`Cliente conectado - UUID: ${finalUuid}, Token corto: ${shortToken}. Total activos: ${activeConnections.size}`);
 
     // Manejar mensajes recibidos
     ws.on('message', (data) => {
         try {
             const message = JSON.parse(data.toString());
             
-            // Actualizar actividad del token
-            tokenManager.updateTokenActivity(finalToken);
+            // Actualizar actividad del token corto
+            tokenManager.updateShortTokenActivity(shortToken);
             
             // Validar formato del mensaje
             if (!message.to || !message.message) {
@@ -138,15 +157,25 @@ wss.on('connection', (ws, req) => {
                 return;
             }
 
-            const targetToken = message.to;
-            const senderToken = ws.token;
+            const targetShortToken = message.to;
+            const senderShortToken = ws.shortToken;
+
+            // Obtener UUID del destinatario a partir del token corto
+            const targetUuid = tokenManager.getUuidByShortToken(targetShortToken);
+            if (!targetUuid) {
+                ws.send(JSON.stringify({
+                    type: 'error',
+                    error: `Destinatario ${targetShortToken} no encontrado`
+                }));
+                return;
+            }
 
             // Buscar el WebSocket del destinatario
-            const targetConn = activeConnections.get(targetToken);
+            const targetConn = activeConnections.get(targetUuid);
             if (!targetConn) {
                 ws.send(JSON.stringify({
                     type: 'error',
-                    error: `Destinatario ${targetToken} no encontrado`
+                    error: `Destinatario ${targetShortToken} no está conectado`
                 }));
                 return;
             }
@@ -154,7 +183,7 @@ wss.on('connection', (ws, req) => {
             // Enviar el mensaje al destinatario
             targetConn.ws.send(JSON.stringify({
                 type: 'message',
-                from: senderToken,
+                from: senderShortToken,
                 message: message.message,
                 timestamp: new Date().toISOString()
             }));
@@ -162,11 +191,11 @@ wss.on('connection', (ws, req) => {
             // Confirmación al remitente
             ws.send(JSON.stringify({
                 type: 'message_sent',
-                to: targetToken,
+                to: targetShortToken,
                 timestamp: new Date().toISOString()
             }));
 
-            console.log(`Mensaje de ${senderToken} a ${targetToken}: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
+            console.log(`Mensaje de ${senderShortToken} a ${targetShortToken}: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
 
         } catch (error) {
             console.error('Error procesando mensaje:', error);
@@ -179,18 +208,18 @@ wss.on('connection', (ws, req) => {
 
     // Manejar cierre de conexión
     ws.on('close', () => {
-        const token = ws.token;
-        if (token && activeConnections.has(token)) {
-            activeConnections.delete(token);
-            // Liberar el token (se marcará como liberado con timestamp)
-            tokenManager.releaseToken(token);
-            console.log(`Cliente desconectado: ${token}. Total activos: ${activeConnections.size}`);
+        const uuid = ws.uuid;
+        if (uuid && activeConnections.has(uuid)) {
+            activeConnections.delete(uuid);
+            // NO liberar el token corto inmediatamente - se liberará después de 10 minutos de inactividad
+            // El tokenManager se encargará de limpiar tokens inactivos
+            console.log(`Cliente desconectado - UUID: ${uuid}, Token corto: ${ws.shortToken}. Total activos: ${activeConnections.size}`);
         }
     });
 
     // Manejar errores en la conexión
     ws.on('error', (error) => {
-        console.error(`Error en WebSocket para token ${ws.token}:`, error);
+        console.error(`Error en WebSocket para UUID ${ws.uuid}:`, error);
     });
 });
 
@@ -198,12 +227,12 @@ wss.on('connection', (ws, req) => {
 const numericPort = Number(PORT);
 server.listen(numericPort, () => {
     console.log(`=========================================`);
-    console.log(`🚀 Servidor WebSocket proxy con tokens iniciado`);
+    console.log(`🚀 Servidor WebSocket proxy con tokens cortos iniciado`);
     console.log(`📡 Puerto: ${numericPort}`);
     console.log(`🌐 URL: ws://localhost:${numericPort}/`);
-    console.log(`🔗 Para reconectar: ws://localhost:${numericPort}/?token=TU_TOKEN`);
+    console.log(`🔗 Para reconectar: ws://localhost:${numericPort}/?uuid=TU_UUID`);
     console.log(`📊 Estado: http://localhost:${numericPort}/status`);
-    console.log(`🔑 Tokens activos: http://localhost:${numericPort}/tokens`);
+    console.log(`🔑 Tokens cortos activos: http://localhost:${numericPort}/tokens`);
     console.log(`=========================================`);
     console.log(`⏰ ${new Date().toLocaleString()}`);
     console.log(`=========================================`);
@@ -226,7 +255,7 @@ process.on('SIGINT', () => {
     console.log(`Cerrando ${activeConnections.size} conexiones activas...`);
     
     // Cerrar todas las conexiones activas
-    for (const [token, conn] of activeConnections) {
+    for (const [uuid, conn] of activeConnections) {
         conn.ws.close();
     }
     

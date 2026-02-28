@@ -1,49 +1,75 @@
-// Test script para verificar el sistema de tokens
+// Test script para verificar el sistema de tokens cortos
 const tokenManager = require('./tokenManager');
 
-console.log('=== Test del Sistema de Tokens ===\n');
+console.log('=== Test del Sistema de Tokens Cortos ===\n');
 
-// Test 1: Generar tokens únicos
-console.log('Test 1: Generar tokens únicos');
+// Test 1: Generar tokens cortos únicos
+console.log('Test 1: Generar tokens cortos únicos');
 const tokens = new Set();
 for (let i = 0; i < 10; i++) {
-    const token = tokenManager.generateUniqueToken();
+    const token = tokenManager.generateUniqueShortToken();
     tokens.add(token);
-    console.log(`  Token ${i + 1}: ${token} (longitud: ${token.length})`);
+    console.log(`  Token corto ${i + 1}: ${token} (longitud: ${token.length})`);
+    // Verificar formato
+    if (!/^[1-9A-Z]+$/.test(token)) {
+        console.log(`    ERROR: Token contiene caracteres inválidos!`);
+    }
 }
-console.log(`  Tokens únicos generados: ${tokens.size}/10\n`);
+console.log(`  Tokens cortos únicos generados: ${tokens.size}/10\n`);
 
-// Test 2: Verificar formato de tokens
-console.log('Test 2: Verificar formato de tokens');
-const testToken = tokenManager.generateRandomToken(4);
-console.log(`  Token de ejemplo: ${testToken}`);
-console.log(`  Longitud: ${testToken.length}`);
-console.log(`  Contiene solo 1-9,A-Z: ${/^[1-9A-Z]+$/.test(testToken)}`);
-
-// Test 3: Asignar y liberar tokens
-console.log('\nTest 3: Asignar y liberar tokens');
-const uuid1 = 'test-uuid-1';
+// Test 2: Asignar tokens cortos a UUIDs
+console.log('Test 2: Asignar tokens cortos a UUIDs');
+const uuid1 = 'test-uuid-1-' + Date.now();
+const uuid2 = 'test-uuid-2-' + Date.now();
 const ip1 = '192.168.1.100';
-const token1 = tokenManager.assignToken(uuid1, ip1);
-console.log(`  Token asignado: ${token1}`);
-console.log(`  Información del token:`, tokenManager.getTokenInfo(token1));
-console.log(`  Es válido para IP ${ip1}: ${tokenManager.isValidTokenForIp(token1, ip1)}`);
-console.log(`  Es válido para IP diferente: ${tokenManager.isValidTokenForIp(token1, '10.0.0.1')}`);
+const ip2 = '192.168.1.101';
 
-// Liberar token
-tokenManager.releaseToken(token1);
-console.log(`  Token liberado: ${token1}`);
-console.log(`  Token aún activo después de liberar: ${tokenManager.getTokenInfo(token1) !== undefined}`);
+const shortToken1 = tokenManager.assignShortToken(uuid1, ip1);
+const shortToken2 = tokenManager.assignShortToken(uuid2, ip2);
 
-// Test 4: Estadísticas
-console.log('\nTest 4: Estadísticas del sistema');
+console.log(`  UUID1: ${uuid1} -> Token corto: ${shortToken1}`);
+console.log(`  UUID2: ${uuid2} -> Token corto: ${shortToken2}`);
+
+// Test 3: Verificar mapeos inversos
+console.log('\nTest 3: Verificar mapeos inversos');
+console.log(`  Token -> UUID para ${shortToken1}: ${tokenManager.getUuidByShortToken(shortToken1)}`);
+console.log(`  UUID -> Token para ${uuid2}: ${tokenManager.getShortTokenByUuid(uuid2)}`);
+
+// Test 4: Validación de tokens
+console.log('\nTest 4: Validación de tokens');
+console.log(`  Token ${shortToken1} válido para IP ${ip1}: ${tokenManager.isValidShortTokenForIp(shortToken1, ip1)}`);
+console.log(`  Token ${shortToken1} válido para IP diferente: ${tokenManager.isValidShortTokenForIp(shortToken1, '10.0.0.1')}`);
+
+// Test 5: Liberar y recuperar tokens
+console.log('\nTest 5: Liberar y recuperar tokens');
+tokenManager.releaseShortToken(shortToken1);
+console.log(`  Token ${shortToken1} liberado`);
+console.log(`  Token aún activo después de liberar: ${tokenManager.getShortTokenInfo(shortToken1) !== undefined}`);
+console.log(`  UUID -> Token después de liberar: ${tokenManager.getShortTokenByUuid(uuid1)}`);
+
+// Test 6: Reconexión (asignar nuevo token al mismo UUID)
+console.log('\nTest 6: Reconexión con mismo UUID');
+const newShortToken1 = tokenManager.assignShortToken(uuid1, ip1);
+console.log(`  Nuevo token para UUID1: ${newShortToken1}`);
+console.log(`  Es diferente al anterior: ${newShortToken1 !== shortToken1}`);
+
+// Test 7: Estadísticas
+console.log('\nTest 7: Estadísticas del sistema');
 const stats = tokenManager.getStats();
 console.log('  Estadísticas:', stats);
 
-// Test 5: Limpieza de tokens expirados
-console.log('\nTest 5: Simular limpieza de tokens expirados');
-// Forzar limpieza
-tokenManager.cleanupExpiredTokens();
-console.log('  Limpieza completada');
+// Test 8: Tokens activos
+console.log('\nTest 8: Lista de tokens activos');
+const activeTokens = tokenManager.getAllActiveShortTokens();
+console.log(`  Tokens activos: ${Object.keys(activeTokens).length}`);
+for (const [token, info] of Object.entries(activeTokens)) {
+    console.log(`    ${token} -> UUID: ${info.uuid.substring(0, 20)}..., IP: ${info.ip}`);
+}
+
+// Test 9: Simular aumento de longitud cuando se acaban tokens únicos
+console.log('\nTest 9: Simular colisión de tokens (forzar aumento de longitud)');
+// Nota: En la práctica, esto ocurriría automáticamente cuando generateUniqueShortToken()
+// no pueda encontrar un token único después de 100 intentos
+console.log('  Longitud actual de tokens:', tokenManager.currentShortTokenLength);
 
 console.log('\n=== Test completado ===');
