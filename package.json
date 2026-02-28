@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon --exec node server.js",
-    "dev:env": "nodemon -r dotenv/config server.js"
+    "dev:env": "nodemon -r dotenv/config server.js",
+    "dev-screen": "./dev-screen.sh"
   },
   "dependencies": {
     "ws": "^8.14.2",
