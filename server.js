@@ -2,29 +2,17 @@ require('dotenv').config();
 const http = require('http');
 const WebSocket = require('ws');
 const url = require('url');
+const tokenManager = require('./tokenManager');
 
 // Configuración
 const PORT = parseInt(process.env.PORT) || 4001;
 
-// Almacenar conexiones activas: uuid -> {ws, ip}
+// Almacenar conexiones activas: token -> {ws, ip, uuid}
 const activeConnections = new Map();
 
-// Convertir IP a base64 sin padding
+// Convertir IP a base64 sin padding (mantenido para compatibilidad)
 function ipToBase64(ip) {
     return Buffer.from(ip).toString('base64').replace(/=/g, '');
-}
-
-// Generar un UUID único que comience con la IP en base64
-function generateUuid(ip) {
-    const ipBase64 = ipToBase64(ip);
-    const uniquePart = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
-    return ipBase64 + '_' + uniquePart;
-}
-
-// Validar si un UUID es válido para una IP dada
-function isValidUuidForIp(uuid, ip) {
-    const ipBase64 = ipToBase64(ip);
-    return uuid.startsWith(ipBase64 + '_');
 }
 
 // Crear servidor HTTP
@@ -35,10 +23,24 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             status: 'online',
             activeConnections: activeConnections.size,
+            tokenStats: tokenManager.getStats(),
+            activeTokens: tokenManager.getAllActiveTokens(),
             timestamp: new Date().toISOString()
         }));
         return;
     }
+    
+    // Ruta para ver tokens activos
+    if (req.url === '/tokens' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            activeTokens: tokenManager.getAllActiveTokens(),
+            stats: tokenManager.getStats(),
+            timestamp: new Date().toISOString()
+        }));
+        return;
+    }
+    
     // Para cualquier otra ruta, responder 404
     res.writeHead(404);
     res.end();
@@ -52,56 +54,81 @@ wss.on('connection', (ws, req) => {
     const clientIp = req.socket.remoteAddress || '0.0.0.0';
     console.log(`Nueva conexión desde IP: ${clientIp}`);
 
-    // Parsear query string para obtener uuid
+    // Parsear query string para obtener token
     const parsedUrl = url.parse(req.url, true);
     const query = parsedUrl.query;
-    let uuid = query.uuid || null;
+    let token = query.token || null;
 
-    let finalUuid;
+    let finalToken;
+    let isReconnection = false;
 
-    if (uuid) {
-        // Validar el UUID proporcionado
-        if (!isValidUuidForIp(uuid, clientIp)) {
-            console.log(`UUID inválido para IP ${clientIp}: ${uuid}`);
+    if (token) {
+        // Validar el token proporcionado
+        if (!tokenManager.isValidTokenForIp(token, clientIp)) {
+            console.log(`Token inválido para IP ${clientIp}: ${token}`);
             ws.close();
             return;
         }
-        // Verificar si el UUID ya está en uso
-        if (activeConnections.has(uuid)) {
-            console.log(`UUID ya en uso: ${uuid}`);
+        
+        // Verificar si el token ya está en uso (conexión activa)
+        if (activeConnections.has(token)) {
+            console.log(`Token ya en uso: ${token}`);
             ws.close();
             return;
         }
-        finalUuid = uuid;
-        console.log(`Reconexión con UUID existente: ${finalUuid}`);
+        
+        finalToken = token;
+        isReconnection = true;
+        console.log(`Reconexión con token existente: ${finalToken}`);
+        
+        // Actualizar actividad del token
+        tokenManager.updateTokenActivity(finalToken);
     } else {
-        // Generar nuevo UUID
-        finalUuid = generateUuid(clientIp);
-        console.log(`Nuevo UUID generado: ${finalUuid}`);
+        // Generar nuevo token
+        // Primero necesitamos un UUID temporal para asignar el token
+        const tempUuid = ipToBase64(clientIp) + '_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+        finalToken = tokenManager.assignToken(tempUuid, clientIp);
+        console.log(`Nuevo token generado: ${finalToken}`);
+    }
+
+    // Obtener información del token
+    const tokenInfo = tokenManager.getTokenInfo(finalToken);
+    if (!tokenInfo) {
+        console.log(`Error: No se pudo obtener información del token ${finalToken}`);
+        ws.close();
+        return;
     }
 
     // Almacenar la conexión
-    activeConnections.set(finalUuid, {
+    activeConnections.set(finalToken, {
         ws: ws,
         ip: clientIp,
-        ipBase64: ipToBase64(clientIp)
+        uuid: tokenInfo.uuid,
+        token: finalToken
     });
 
-    // Asociar el UUID con el WebSocket
-    ws.uuid = finalUuid;
+    // Asociar el token con el WebSocket
+    ws.token = finalToken;
+    ws.uuid = tokenInfo.uuid;
 
-    // Enviar el UUID al cliente
+    // Enviar el token al cliente
     ws.send(JSON.stringify({
-        type: 'uuid_assigned',
-        uuid: finalUuid
+        type: 'token_assigned',
+        token: finalToken,
+        isReconnection: isReconnection,
+        message: isReconnection ? 'Reconexión exitosa' : 'Nueva conexión establecida'
     }));
 
-    console.log(`Cliente conectado con UUID: ${finalUuid}. Total activos: ${activeConnections.size}`);
+    console.log(`Cliente conectado con token: ${finalToken}. Total activos: ${activeConnections.size}`);
 
     // Manejar mensajes recibidos
     ws.on('message', (data) => {
         try {
             const message = JSON.parse(data.toString());
+            
+            // Actualizar actividad del token
+            tokenManager.updateTokenActivity(finalToken);
+            
             // Validar formato del mensaje
             if (!message.to || !message.message) {
                 ws.send(JSON.stringify({
@@ -111,15 +138,15 @@ wss.on('connection', (ws, req) => {
                 return;
             }
 
-            const targetUuid = message.to;
-            const senderUuid = ws.uuid;
+            const targetToken = message.to;
+            const senderToken = ws.token;
 
             // Buscar el WebSocket del destinatario
-            const targetConn = activeConnections.get(targetUuid);
+            const targetConn = activeConnections.get(targetToken);
             if (!targetConn) {
                 ws.send(JSON.stringify({
                     type: 'error',
-                    error: `Destinatario ${targetUuid} no encontrado`
+                    error: `Destinatario ${targetToken} no encontrado`
                 }));
                 return;
             }
@@ -127,7 +154,7 @@ wss.on('connection', (ws, req) => {
             // Enviar el mensaje al destinatario
             targetConn.ws.send(JSON.stringify({
                 type: 'message',
-                from: senderUuid,
+                from: senderToken,
                 message: message.message,
                 timestamp: new Date().toISOString()
             }));
@@ -135,11 +162,11 @@ wss.on('connection', (ws, req) => {
             // Confirmación al remitente
             ws.send(JSON.stringify({
                 type: 'message_sent',
-                to: targetUuid,
+                to: targetToken,
                 timestamp: new Date().toISOString()
             }));
 
-            console.log(`📨 Mensaje de ${senderUuid} a ${targetUuid}: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
+            console.log(`Mensaje de ${senderToken} a ${targetToken}: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
 
         } catch (error) {
             console.error('Error procesando mensaje:', error);
@@ -152,16 +179,18 @@ wss.on('connection', (ws, req) => {
 
     // Manejar cierre de conexión
     ws.on('close', () => {
-        const uuid = ws.uuid;
-        if (uuid && activeConnections.has(uuid)) {
-            activeConnections.delete(uuid);
-            console.log(`Cliente desconectado: ${uuid}. Total activos: ${activeConnections.size}`);
+        const token = ws.token;
+        if (token && activeConnections.has(token)) {
+            activeConnections.delete(token);
+            // Liberar el token (se marcará como liberado con timestamp)
+            tokenManager.releaseToken(token);
+            console.log(`Cliente desconectado: ${token}. Total activos: ${activeConnections.size}`);
         }
     });
 
     // Manejar errores en la conexión
     ws.on('error', (error) => {
-        console.error(`Error en WebSocket para UUID ${ws.uuid}:`, error);
+        console.error(`Error en WebSocket para token ${ws.token}:`, error);
     });
 });
 
@@ -169,22 +198,23 @@ wss.on('connection', (ws, req) => {
 const numericPort = Number(PORT);
 server.listen(numericPort, () => {
     console.log(`=========================================`);
-    console.log(`🚀 Servidor WebSocket proxy iniciado`);
+    console.log(`🚀 Servidor WebSocket proxy con tokens iniciado`);
     console.log(`📡 Puerto: ${numericPort}`);
     console.log(`🌐 URL: ws://localhost:${numericPort}/`);
-    console.log(`🔗 Para reconectar: ws://localhost:${numericPort}/?uuid=TU_UUID`);
+    console.log(`🔗 Para reconectar: ws://localhost:${numericPort}/?token=TU_TOKEN`);
     console.log(`📊 Estado: http://localhost:${numericPort}/status`);
+    console.log(`🔑 Tokens activos: http://localhost:${numericPort}/tokens`);
     console.log(`=========================================`);
     console.log(`⏰ ${new Date().toLocaleString()}`);
     console.log(`=========================================`);
 }).on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-        console.error(`❌ Error: El puerto ${numericPort} ya está en uso.`);
+        console.error(`Error: El puerto ${numericPort} ya está en uso.`);
         console.error(`   Puedes cambiar el puerto en el archivo .env o liberar el puerto.`);
         console.error(`   Para matar el proceso que usa el puerto ${numericPort}, ejecuta:`);
         console.error(`   sudo kill -9 $(sudo lsof -ti:${numericPort})`);
     } else {
-        console.error(`❌ Error al iniciar servidor:`, err);
+        console.error(`Error al iniciar servidor:`, err);
     }
     process.exit(1);
 });
@@ -192,15 +222,15 @@ server.listen(numericPort, () => {
 // Manejo de cierre limpio
 process.on('SIGINT', () => {
     console.log('\n=========================================');
-    console.log('🛑 Recibida señal SIGINT (Ctrl+C)');
-    console.log(`📊 Cerrando ${activeConnections.size} conexiones activas...`);
+    console.log('Recibida señal SIGINT (Ctrl+C)');
+    console.log(`Cerrando ${activeConnections.size} conexiones activas...`);
     
     // Cerrar todas las conexiones activas
-    for (const [uuid, conn] of activeConnections) {
+    for (const [token, conn] of activeConnections) {
         conn.ws.close();
     }
     
-    console.log('👋 Servidor cerrado correctamente');
+    console.log('Servidor cerrado correctamente');
     console.log('=========================================');
     process.exit(0);
 });
