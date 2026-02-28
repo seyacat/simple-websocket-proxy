@@ -7,7 +7,7 @@ const tokenManager = require('./tokenManager');
 // Configuración
 const PORT = parseInt(process.env.PORT) || 4001;
 
-// Almacenar conexiones activas: uuid -> {ws, ip, shortToken}
+// Almacenar conexiones activas: uuid -> {ws, ip, shortToken, mode, subscribedTo, subscribers}
 const activeConnections = new Map();
 
 // Convertir IP a base64 sin padding
@@ -28,16 +28,183 @@ function isValidUuidForIp(uuid, ip) {
     return uuid.startsWith(ipBase64 + '_');
 }
 
+// Helper functions para manejo de modos y suscripciones
+
+// Obtener información de conexión por token corto
+function getConnectionByShortToken(shortToken) {
+    const uuid = tokenManager.getUuidByShortToken(shortToken);
+    if (!uuid) return null;
+    return activeConnections.get(uuid);
+}
+
+// Establecer modo de un cliente
+function setClientMode(uuid, mode) {
+    const conn = activeConnections.get(uuid);
+    if (!conn) return false;
+    
+    // Limpiar estado anterior según el modo actual
+    if (conn.mode === 'guest' && conn.subscribedTo) {
+        // Si era guest suscrito, desuscribirse del host
+        unsubscribeGuest(uuid);
+    } else if (conn.mode === 'host') {
+        // Si era host, notificar a todos los subscribers que se desconectó
+        notifyHostDisconnection(conn.shortToken);
+        conn.subscribers.clear();
+    }
+    
+    // Establecer nuevo modo
+    conn.mode = mode;
+    
+    // Limpiar estado relacionado con el modo anterior
+    if (mode === 'guest') {
+        conn.subscribers.clear(); // Guests no tienen subscribers
+    } else if (mode === 'host') {
+        conn.subscribedTo = null; // Hosts no están suscritos a nadie
+    }
+    
+    return true;
+}
+
+// Suscribir un guest a un host
+function subscribeGuestToHost(guestUuid, hostShortToken) {
+    const guestConn = activeConnections.get(guestUuid);
+    if (!guestConn || guestConn.mode !== 'guest') {
+        return { success: false, error: 'Cliente no está en modo guest' };
+    }
+    
+    const hostConn = getConnectionByShortToken(hostShortToken);
+    if (!hostConn || hostConn.mode !== 'host') {
+        return { success: false, error: 'Host no encontrado o no está en modo host' };
+    }
+    
+    // Desuscribirse del host anterior si está suscrito a otro
+    if (guestConn.subscribedTo && guestConn.subscribedTo !== hostShortToken) {
+        unsubscribeGuest(guestUuid);
+    }
+    
+    // Si ya está suscrito a este host, no hacer nada
+    if (guestConn.subscribedTo === hostShortToken) {
+        return { success: true, alreadySubscribed: true };
+    }
+    
+    // Establecer suscripción
+    guestConn.subscribedTo = hostShortToken;
+    hostConn.subscribers.add(guestConn.shortToken);
+    
+    return { success: true };
+}
+
+// Desuscribir un guest
+function unsubscribeGuest(guestUuid) {
+    const guestConn = activeConnections.get(guestUuid);
+    if (!guestConn || !guestConn.subscribedTo) return false;
+    
+    const hostShortToken = guestConn.subscribedTo;
+    const hostConn = getConnectionByShortToken(hostShortToken);
+    
+    if (hostConn) {
+        hostConn.subscribers.delete(guestConn.shortToken);
+    }
+    
+    guestConn.subscribedTo = null;
+    return true;
+}
+
+// Notificar a todos los guests que su host se desconectó
+function notifyHostDisconnection(hostShortToken) {
+    const hostConn = getConnectionByShortToken(hostShortToken);
+    if (!hostConn) return;
+    
+    for (const guestToken of hostConn.subscribers) {
+        const guestUuid = tokenManager.getUuidByShortToken(guestToken);
+        if (!guestUuid) continue;
+        
+        const guestConn = activeConnections.get(guestUuid);
+        if (guestConn) {
+            guestConn.subscribedTo = null;
+            guestConn.ws.send(JSON.stringify({
+                type: 'host_disconnected',
+                host: hostShortToken,
+                message: 'El host se ha desconectado',
+                timestamp: new Date().toISOString()
+            }));
+        }
+    }
+    
+    hostConn.subscribers.clear();
+}
+
+// Enviar broadcast a todos los subscribers de un host
+function broadcastToSubscribers(hostShortToken, message, senderShortToken) {
+    const hostConn = getConnectionByShortToken(hostShortToken);
+    if (!hostConn) return 0;
+    
+    let sentCount = 0;
+    for (const guestToken of hostConn.subscribers) {
+        const guestUuid = tokenManager.getUuidByShortToken(guestToken);
+        if (!guestUuid) continue;
+        
+        const guestConn = activeConnections.get(guestUuid);
+        if (guestConn && guestConn.ws.readyState === 1) { // WebSocket.OPEN === 1
+            guestConn.ws.send(JSON.stringify({
+                type: 'broadcast_message',
+                from: senderShortToken,
+                message: message,
+                timestamp: new Date().toISOString()
+            }));
+            sentCount++;
+        }
+    }
+    
+    return sentCount;
+}
+
 // Crear servidor HTTP
 const server = http.createServer((req, res) => {
     // Ruta de estado
     if (req.url === '/status' && req.method === 'GET') {
+        // Calcular estadísticas de modos y suscripciones
+        let hostCount = 0;
+        let guestCount = 0;
+        let noModeCount = 0;
+        let totalSubscriptions = 0;
+        const hostsWithSubscribers = [];
+        
+        for (const [uuid, conn] of activeConnections) {
+            if (conn.mode === 'host') {
+                hostCount++;
+                const subscriberCount = conn.subscribers.size;
+                totalSubscriptions += subscriberCount;
+                if (subscriberCount > 0) {
+                    hostsWithSubscribers.push({
+                        shortToken: conn.shortToken,
+                        subscribers: Array.from(conn.subscribers),
+                        subscriberCount: subscriberCount
+                    });
+                }
+            } else if (conn.mode === 'guest') {
+                guestCount++;
+                if (conn.subscribedTo) {
+                    totalSubscriptions++;
+                }
+            } else {
+                noModeCount++;
+            }
+        }
+        
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: 'online',
             activeConnections: activeConnections.size,
             tokenStats: tokenManager.getStats(),
             activeShortTokens: tokenManager.getAllActiveShortTokens(),
+            modeStats: {
+                hosts: hostCount,
+                guests: guestCount,
+                noMode: noModeCount,
+                totalSubscriptions: totalSubscriptions,
+                hostsWithSubscribers: hostsWithSubscribers
+            },
             timestamp: new Date().toISOString()
         }));
         return;
@@ -122,7 +289,10 @@ wss.on('connection', (ws, req) => {
         ws: ws,
         ip: clientIp,
         shortToken: shortToken,
-        uuid: finalUuid
+        uuid: finalUuid,
+        mode: null, // 'host', 'guest', o null
+        subscribedTo: null, // para guests: token corto del host al que están suscritos
+        subscribers: new Set() // para hosts: conjunto de tokens cortos de guests suscritos
     });
 
     // Asociar el UUID y token corto con el WebSocket
@@ -148,7 +318,19 @@ wss.on('connection', (ws, req) => {
             // Actualizar actividad del token corto
             tokenManager.updateShortTokenActivity(shortToken);
             
-            // Validar formato del mensaje
+            // Manejar mensajes de tipo especial (set_mode, subscribe, unsubscribe)
+            if (message.type === 'set_mode') {
+                handleSetModeMessage(ws, message);
+                return;
+            } else if (message.type === 'subscribe') {
+                handleSubscribeMessage(ws, message);
+                return;
+            } else if (message.type === 'unsubscribe') {
+                handleUnsubscribeMessage(ws);
+                return;
+            }
+            
+            // Mensaje regular (to + message)
             if (!message.to || !message.message) {
                 ws.send(JSON.stringify({
                     type: 'error',
@@ -159,7 +341,27 @@ wss.on('connection', (ws, req) => {
 
             const targetShortToken = message.to;
             const senderShortToken = ws.shortToken;
+            const senderUuid = ws.uuid;
+            const senderConn = activeConnections.get(senderUuid);
 
+            // Verificar si es un broadcast (host enviando a su propio token)
+            if (targetShortToken === senderShortToken && senderConn && senderConn.mode === 'host') {
+                // Es un broadcast del host a sus subscribers
+                const sentCount = broadcastToSubscribers(senderShortToken, message.message, senderShortToken);
+                
+                // Confirmación al host
+                ws.send(JSON.stringify({
+                    type: 'broadcast_sent',
+                    to: 'all_subscribers',
+                    subscribersCount: sentCount,
+                    timestamp: new Date().toISOString()
+                }));
+                
+                console.log(`Broadcast de ${senderShortToken} a ${sentCount} subscribers: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
+                return;
+            }
+
+            // Mensaje directo normal
             // Obtener UUID del destinatario a partir del token corto
             const targetUuid = tokenManager.getUuidByShortToken(targetShortToken);
             if (!targetUuid) {
@@ -205,15 +407,151 @@ wss.on('connection', (ws, req) => {
             }));
         }
     });
+    
+    // Funciones auxiliares para manejar mensajes especiales
+    function handleSetModeMessage(ws, message) {
+        const uuid = ws.uuid;
+        const mode = message.mode;
+        
+        if (mode !== 'host' && mode !== 'guest') {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Modo inválido. Debe ser "host" o "guest"'
+            }));
+            return;
+        }
+        
+        const success = setClientMode(uuid, mode);
+        if (success) {
+            ws.send(JSON.stringify({
+                type: 'mode_set',
+                mode: mode,
+                message: `Modo cambiado a ${mode}`,
+                timestamp: new Date().toISOString()
+            }));
+            console.log(`Cliente ${ws.shortToken} cambió a modo ${mode}`);
+        } else {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Error al cambiar el modo'
+            }));
+        }
+    }
+    
+    function handleSubscribeMessage(ws, message) {
+        const uuid = ws.uuid;
+        const hostShortToken = message.to;
+        
+        if (!hostShortToken) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Token corto del host requerido'
+            }));
+            return;
+        }
+        
+        const result = subscribeGuestToHost(uuid, hostShortToken);
+        if (result.success) {
+            const conn = activeConnections.get(uuid);
+            ws.send(JSON.stringify({
+                type: 'subscribed',
+                to: hostShortToken,
+                message: result.alreadySubscribed ? 'Ya estabas suscrito a este host' : 'Suscripción exitosa',
+                timestamp: new Date().toISOString()
+            }));
+            
+            // Notificar al host sobre el nuevo subscriber
+            const hostConn = getConnectionByShortToken(hostShortToken);
+            if (hostConn) {
+                hostConn.ws.send(JSON.stringify({
+                    type: 'new_subscriber',
+                    guest: conn.shortToken,
+                    subscribersCount: hostConn.subscribers.size,
+                    timestamp: new Date().toISOString()
+                }));
+            }
+            
+            console.log(`Guest ${conn.shortToken} suscrito a host ${hostShortToken}`);
+        } else {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: result.error || 'Error en la suscripción'
+            }));
+        }
+    }
+    
+    function handleUnsubscribeMessage(ws) {
+        const uuid = ws.uuid;
+        const conn = activeConnections.get(uuid);
+        
+        if (!conn || !conn.subscribedTo) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'No estás suscrito a ningún host'
+            }));
+            return;
+        }
+        
+        const hostShortToken = conn.subscribedTo;
+        const success = unsubscribeGuest(uuid);
+        
+        if (success) {
+            ws.send(JSON.stringify({
+                type: 'unsubscribed',
+                from: hostShortToken,
+                message: 'Suscripción cancelada',
+                timestamp: new Date().toISOString()
+            }));
+            
+            // Notificar al host sobre la desuscripción
+            const hostConn = getConnectionByShortToken(hostShortToken);
+            if (hostConn) {
+                hostConn.ws.send(JSON.stringify({
+                    type: 'subscriber_left',
+                    guest: conn.shortToken,
+                    subscribersCount: hostConn.subscribers.size,
+                    timestamp: new Date().toISOString()
+                }));
+            }
+            
+            console.log(`Guest ${conn.shortToken} desuscrito de host ${hostShortToken}`);
+        } else {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Error al cancelar la suscripción'
+            }));
+        }
+    }
 
     // Manejar cierre de conexión
     ws.on('close', () => {
         const uuid = ws.uuid;
         if (uuid && activeConnections.has(uuid)) {
+            const conn = activeConnections.get(uuid);
+            
+            // Limpiar suscripciones antes de eliminar la conexión
+            if (conn.mode === 'guest' && conn.subscribedTo) {
+                // Guest desconectado: remover del host
+                const hostConn = getConnectionByShortToken(conn.subscribedTo);
+                if (hostConn) {
+                    hostConn.subscribers.delete(conn.shortToken);
+                    // Notificar al host sobre la desconexión del guest
+                    hostConn.ws.send(JSON.stringify({
+                        type: 'subscriber_disconnected',
+                        guest: conn.shortToken,
+                        subscribersCount: hostConn.subscribers.size,
+                        timestamp: new Date().toISOString()
+                    }));
+                }
+            } else if (conn.mode === 'host') {
+                // Host desconectado: notificar a todos los subscribers
+                notifyHostDisconnection(conn.shortToken);
+            }
+            
             activeConnections.delete(uuid);
             // NO liberar el token corto inmediatamente - se liberará después de 10 minutos de inactividad
             // El tokenManager se encargará de limpiar tokens inactivos
-            console.log(`Cliente desconectado - UUID: ${uuid}, Token corto: ${ws.shortToken}. Total activos: ${activeConnections.size}`);
+            console.log(`Cliente desconectado - UUID: ${uuid}, Token corto: ${ws.shortToken}, Modo: ${conn.mode || 'none'}. Total activos: ${activeConnections.size}`);
         }
     });
 
