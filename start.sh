@@ -25,12 +25,19 @@ else
     echo "✅ No existing session found."
 fi
 
-echo "🚀 Starting new screen session '$SESSION_NAME' with 'npm run dev'..."
+echo "🚀 Starting new screen session '$SESSION_NAME'..."
 
-# Start a new screen session in detached mode and run npm run dev
-screen -dmS $SESSION_NAME bash -c "npm run dev; exec bash"
+# Start a new screen session in detached mode with just bash
+screen -dmS $SESSION_NAME bash
 
 # Give it a moment to start
+sleep 1
+
+# Inject the npm run dev command into the screen session
+echo "💉 Injecting 'npm run dev' command into screen session..."
+screen -S $SESSION_NAME -X stuff "npm run dev$(printf \\r)"
+
+# Give it a moment to start the server
 sleep 2
 
 # Check if the session was created successfully
