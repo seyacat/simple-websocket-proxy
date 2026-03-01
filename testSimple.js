@@ -264,16 +264,49 @@ async function test6() {
     return true;
 }
 
-// Test 7: Notificación de desconexión
+// Test 7: Desconexión manual entre clientes
 async function test7() {
-    console.log('\nTest 7: Notificación de desconexión');
+    console.log('\nTest 7: Desconexión manual entre clientes');
     
-    // Configurar listener en cliente2 para notificación de desconexión
+    // Primero necesitamos reconectar cliente1 (fue desconectado en test anterior)
+    client1 = new WebSocket(SERVER_URL);
+    
+    const response1 = await new Promise((resolve, reject) => {
+        client1.on('open', () => {
+            console.log('  ✓ Cliente 1 reconectado');
+        });
+        
+        client1.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                if (msg.type === 'connected') {
+                    token1 = msg.token;
+                    resolve(msg);
+                }
+            } catch (error) {
+                reject(error);
+            }
+        });
+        
+        client1.on('error', reject);
+    });
+    
+    console.log(`  ✓ Nuevo token asignado: ${token1}`);
+    
+    // Enviar un mensaje de cliente1 a cliente2 para crear un par de conexión
+    await sendAndWait(client1, {
+        to: [token2],
+        message: 'Mensaje para crear par de conexión'
+    }, 'message_sent');
+    
+    console.log('  ✓ Par de conexión creado entre cliente1 y cliente2');
+    
+    // Configurar listener en cliente2 para notificación de desconexión manual
     const disconnectPromise = new Promise((resolve) => {
         client2.once('message', (data) => {
             try {
                 const msg = JSON.parse(data.toString());
-                if (msg.type === 'disconnected') {
+                if (msg.type === 'disconnected' && msg.token === token1) {
                     resolve(msg);
                 }
             } catch (error) {
@@ -282,23 +315,113 @@ async function test7() {
         });
     });
     
-    // Desconectar cliente1
-    console.log('  Desconectando cliente1...');
-    client1.close();
+    // Enviar comando disconnect de cliente1 a cliente2
+    const disconnectResponse = await sendAndWait(client1, {
+        type: 'disconnect',
+        target: token2
+    }, 'disconnect_confirmation');
+    
+    console.log(`  ✓ Cliente1 envió disconnect a ${disconnectResponse.target}`);
     
     // Esperar notificación en cliente2
     try {
         const disconnectMsg = await Promise.race([
             disconnectPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout esperando notificación')), 2000))
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout esperando notificación de disconnect')), 2000))
         ]);
         
-        console.log(`  ✓ Cliente2 notificado de desconexión de: ${disconnectMsg.token}`);
+        console.log(`  ✓ Cliente2 notificado de desconexión manual de: ${disconnectMsg.token}`);
         return true;
     } catch (error) {
         console.log(`  ✗ ${error.message}`);
         return false;
     }
+}
+
+// Test 8: Notificación de desconexión automática
+async function test8() {
+    console.log('\nTest 8: Notificación de desconexión automática');
+    
+    // Conectar un nuevo cliente3
+    client3 = new WebSocket(SERVER_URL);
+    
+    const response3 = await new Promise((resolve, reject) => {
+        client3.on('open', () => {
+            console.log('  ✓ Cliente 3 conectado');
+        });
+        
+        client3.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                if (msg.type === 'connected') {
+                    token3 = msg.token;
+                    resolve(msg);
+                }
+            } catch (error) {
+                reject(error);
+            }
+        });
+        
+        client3.on('error', reject);
+    });
+    
+    console.log(`  ✓ Token asignado: ${token3}`);
+    
+    // Enviar un mensaje de cliente2 a cliente3 para crear un par de conexión
+    await sendAndWait(client2, {
+        to: [token3],
+        message: 'Mensaje para crear par de conexión'
+    }, 'message_sent');
+    
+    console.log('  ✓ Par de conexión creado entre cliente2 y cliente3');
+    
+    // Configurar listener en cliente2 para notificación de desconexión automática
+    const disconnectPromise = new Promise((resolve) => {
+        client2.once('message', (data) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                if (msg.type === 'disconnected' && msg.token === token3) {
+                    resolve(msg);
+                }
+            } catch (error) {
+                // Ignorar
+            }
+        });
+    });
+    
+    // Desconectar cliente3 (desconexión automática)
+    console.log('  Desconectando cliente3...');
+    client3.close();
+    
+    // Esperar notificación en cliente2
+    try {
+        const disconnectMsg = await Promise.race([
+            disconnectPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout esperando notificación automática')), 2000))
+        ]);
+        
+        console.log(`  ✓ Cliente2 notificado de desconexión automática de: ${disconnectMsg.token}`);
+        return true;
+    } catch (error) {
+        console.log(`  ✗ ${error.message}`);
+        return false;
+    }
+}
+
+// Test 9: Mensaje a token inválido
+async function test9() {
+    console.log('\nTest 9: Mensaje a token inválido');
+    
+    const response = await sendAndWait(client1, {
+        to: ['INVALID'],
+        message: 'Mensaje a token inválido'
+    }, 'message_sent');
+    
+    console.log(`  ✓ Respuesta: ${response.sent}/1 enviados`);
+    if (response.failed && response.failed.includes('INVALID')) {
+        console.log('  ✓ Token inválido correctamente identificado');
+    }
+    return true;
 }
 
 // Test 8: Mensaje a token inválido

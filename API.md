@@ -81,6 +81,33 @@ Cada cliente puede publicarse en un canal a la vez.
 }
 ```
 
+### Desconectar manualmente de otro cliente
+Remover manualmente un par de conexión y notificar a ambas partes.
+```json
+{
+  "type": "disconnect",
+  "target": "ABCD"
+}
+```
+
+**Respuesta exitosa:**
+```json
+{
+  "type": "disconnect_confirmation",
+  "target": "ABCD",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+**Notificación enviada a ambas partes:**
+```json
+{
+  "type": "disconnected",
+  "token": "ABCD",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
 ### Listar tokens en canal
 Obtener los últimos 100 tokens no expirados en un canal.
 ```json
@@ -103,7 +130,7 @@ Obtener los últimos 100 tokens no expirados en un canal.
 ```
 
 ### Notificación de desconexión
-Cuando un cliente con el que te has comunicado se desconecta:
+Cuando un cliente con el que te has comunicado se desconecta (automáticamente o manualmente):
 ```json
 {
   "type": "disconnected",
@@ -182,6 +209,12 @@ ws.send(JSON.stringify({
 ws.send(JSON.stringify({
   to: ['ABCD', 'EFGH'],
   message: '¡Hola a todos!'
+}));
+
+// Desconectar manualmente de otro cliente
+ws.send(JSON.stringify({
+  type: 'disconnect',
+  target: 'ABCD'
 }));
 ```
 

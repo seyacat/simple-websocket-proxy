@@ -84,6 +84,15 @@ El servidor se inicia en `ws://localhost:4001` por defecto (configurable con var
 }
 ```
 
+### Confirmación de desconexión manual
+```json
+{
+  "type": "disconnect_confirmation",
+  "target": "ABCD",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
 ### Lista de tokens en canal
 ```json
 {
@@ -126,6 +135,14 @@ ws://localhost:4001/
 {
   "to": ["ABCD", "EFGH"],
   "message": "Texto del mensaje"
+}
+```
+
+### Desconectar manualmente de otro cliente
+```json
+{
+  "type": "disconnect",
+  "target": "ABCD"
 }
 ```
 

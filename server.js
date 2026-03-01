@@ -126,6 +126,40 @@ function notifyPairedClients(disconnectedToken) {
     return tokensToNotify.size;
 }
 
+// Remover par de conexión manualmente y notificar a ambas partes
+function removeConnectionPair(token1, token2) {
+    const pairKey = createPairKey(token1, token2);
+    
+    if (!connectionPairs.has(pairKey)) {
+        return { success: false, error: 'Los tokens no están pareados' };
+    }
+    
+    // Remover el par
+    connectionPairs.delete(pairKey);
+    
+    // Notificar a ambos clientes si están conectados
+    const conn1 = activeConnections.get(token1);
+    const conn2 = activeConnections.get(token2);
+    
+    if (conn1 && conn1.ws.readyState === WebSocket.OPEN) {
+        conn1.ws.send(JSON.stringify({
+            type: 'disconnected',
+            token: token2,
+            timestamp: new Date().toISOString()
+        }));
+    }
+    
+    if (conn2 && conn2.ws.readyState === WebSocket.OPEN) {
+        conn2.ws.send(JSON.stringify({
+            type: 'disconnected',
+            token: token1,
+            timestamp: new Date().toISOString()
+        }));
+    }
+    
+    return { success: true, pair: pairKey };
+}
+
 // Crear servidor HTTP básico (solo para WebSocket upgrade)
 const server = http.createServer((req, res) => {
     // Para cualquier ruta, responder 404 (no necesitamos endpoints HTTP)
@@ -171,12 +205,15 @@ wss.on('connection', (ws, req) => {
             // Actualizar actividad del token
             tokenManager.updateTokenActivity(token);
             
-            // Manejar mensajes de tipo especial (publish, list)
+            // Manejar mensajes de tipo especial (publish, list, disconnect)
             if (message.type === 'publish') {
                 handlePublishMessage(ws, message);
                 return;
             } else if (message.type === 'list') {
                 handleListMessage(ws, message);
+                return;
+            } else if (message.type === 'disconnect') {
+                handleDisconnectMessage(ws, message);
                 return;
             }
             
@@ -315,6 +352,56 @@ wss.on('connection', (ws, req) => {
         }));
         
         console.log(`Cliente ${token} solicitó lista del canal ${channel}: ${tokens.length} tokens`);
+    }
+    
+    function handleDisconnectMessage(ws, message) {
+        const targetToken = message.target;
+        
+        if (!targetToken || typeof targetToken !== 'string') {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Token destino requerido (string)'
+            }));
+            return;
+        }
+        
+        // Verificar que el token destino no sea el mismo
+        if (targetToken === token) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'No puedes desconectarte de ti mismo'
+            }));
+            return;
+        }
+        
+        // Verificar que el token destino exista y esté conectado
+        const targetConn = activeConnections.get(targetToken);
+        if (!targetConn) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: `Token destino ${targetToken} no encontrado o no conectado`
+            }));
+            return;
+        }
+        
+        // Remover el par de conexión y notificar a ambas partes
+        const result = removeConnectionPair(token, targetToken);
+        
+        if (result.success) {
+            // Enviar confirmación al cliente que solicitó la desconexión
+            ws.send(JSON.stringify({
+                type: 'disconnect_confirmation',
+                target: targetToken,
+                timestamp: new Date().toISOString()
+            }));
+            
+            console.log(`Cliente ${token} desconectó manualmente de ${targetToken}`);
+        } else {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: result.error
+            }));
+        }
     }
     
     // Manejar cierre de conexión
