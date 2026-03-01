@@ -453,6 +453,7 @@ async function runAllTests() {
         await test6();
         await test7();
         await test8();
+        await test9();
         
         console.log('\n=========================================');
         console.log('✅ TODOS LOS TESTS COMPLETADOS EXITOSAMENTE');
