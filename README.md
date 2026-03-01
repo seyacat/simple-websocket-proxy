@@ -1,16 +1,19 @@
-# Simple WebSocket Proxy con Modos Host/Guest
+# Simple WebSocket Proxy Simplificado
 
-Un servidor WebSocket proxy que permite comunicación entre clientes usando tokens cortos alfanuméricos, con soporte para modos host/guest, suscripciones y broadcast.
+Un servidor WebSocket proxy que implementa las 4 reglas especificadas en `definition.txt`:
+1. Asignación de tokens de 4 caracteres alfanuméricos (1-9, A-Z)
+2. Envío de mensajes a uno o múltiples destinos
+3. Seguimiento de pares de conexión para notificaciones de desconexión
+4. Canales públicos con expiración de 20 minutos
 
 ## Características
 
-- **Tokens cortos alfanuméricos**: Identificación simple de clientes (ej: "ABC123")
-- **Modos host/guest**: Cada cliente puede ser host (crea canales) o guest (se suscribe a canales)
-- **Sistema de suscripciones**: Guests pueden suscribirse a hosts usando su token corto
-- **Broadcast**: Hosts pueden enviar mensajes a todos sus guests suscritos
-- **Mensajería directa**: Comunicación punto a punto entre cualquier cliente
-- **Reconexión persistente**: Los tokens se mantienen por 10 minutos después de desconexión
-- **Estadísticas en tiempo real**: Endpoint HTTP para monitorear conexiones y suscripciones
+- **Tokens cortos alfanuméricos**: 4 caracteres (1-9, A-Z) asignados automáticamente
+- **Mensajería múltiple**: Envío a uno o varios destinos simultáneamente
+- **Notificaciones de desconexión**: Aviso cuando clientes pareados se desconectan
+- **Canales públicos**: Publicación y listado de tokens en canales
+- **Expiración automática**: Tokens en canales expiran después de 20 minutos
+- **Simple y minimalista**: Solo las funcionalidades requeridas
 
 ## Instalación
 
@@ -30,319 +33,184 @@ npm run dev
 
 El servidor se inicia en `ws://localhost:4001` por defecto (configurable con variable de entorno `PORT`).
 
-### Endpoints HTTP
+## Respuestas del Servidor
 
-- `GET /status` - Estado del servidor y estadísticas
-- `GET /tokens` - Lista de tokens cortos activos
+### Al conectar
+```json
+{
+  "type": "connected",
+  "token": "ABCD",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Mensaje recibido de otro cliente
+```json
+{
+  "type": "message",
+  "from": "ABCD",
+  "message": "Texto del mensaje",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Confirmación de mensaje enviado
+```json
+{
+  "type": "message_sent",
+  "sent": 2,
+  "total": 2,
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Confirmación de mensaje enviado con errores
+```json
+{
+  "type": "message_sent",
+  "sent": 1,
+  "total": 2,
+  "failed": ["EFGH"],
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Confirmación de publicación en canal
+```json
+{
+  "type": "published",
+  "channel": "nombre-del-canal",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Lista de tokens en canal
+```json
+{
+  "type": "channel_list",
+  "channel": "nombre-del-canal",
+  "tokens": ["ABCD", "EFGH", "IJKL"],
+  "count": 3,
+  "maxEntries": 100,
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Notificación de desconexión
+```json
+{
+  "type": "disconnected",
+  "token": "ABCD",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Error
+```json
+{
+  "type": "error",
+  "error": "Mensaje de error descriptivo"
+}
+```
 
 ## Protocolo WebSocket
 
 ### Conexión inicial
-
 Conectar al servidor WebSocket:
 ```
 ws://localhost:4001/
 ```
 
-El servidor responde con:
+### Enviar mensaje
 ```json
 {
-  "type": "connection_established",
-  "uuid": "QmFzZTY0XzE3MDk4NzY1NDMyMQ...",
-  "shortToken": "ABC123",
-  "isReconnection": false,
-  "message": "Nueva conexión establecida"
+  "to": ["ABCD", "EFGH"],
+  "message": "Texto del mensaje"
 }
 ```
 
-### Reconexión
-
-Para reconectar con el mismo UUID:
-```
-ws://localhost:4001/?uuid=TU_UUID
-```
-
-### Modos Host/Guest
-
-#### Establecer modo
+### Publicar en canal
 ```json
 {
-  "type": "set_mode",
-  "mode": "host",  // o "guest"
-  "visibility": "public"  // opcional: "public" o "private" (solo para hosts, por defecto "private")
+  "type": "publish",
+  "channel": "nombre-del-canal"
 }
 ```
 
-Respuesta para host:
+### Listar tokens en canal
 ```json
 {
-  "type": "mode_set",
-  "mode": "host",
-  "visibility": "public",
-  "message": "Modo cambiado a host (public)",
-  "timestamp": "2026-02-28T05:00:00.000Z"
+  "type": "list",
+  "channel": "nombre-del-canal"
 }
 ```
 
-Respuesta para guest:
-```json
-{
-  "type": "mode_set",
-  "mode": "guest",
-  "message": "Modo cambiado a guest",
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
+## API Completa
 
-#### Listar hosts públicos
-```json
-{
-  "type": "list_public_hosts"
-}
-```
-
-Respuesta:
-```json
-{
-  "type": "public_hosts_list",
-  "hosts": [
-    {
-      "shortToken": "ABC123",
-      "subscribersCount": 3,
-      "visibility": "public"
-    },
-    {
-      "shortToken": "DEF456",
-      "subscribersCount": 0,
-      "visibility": "public"
-    }
-  ],
-  "count": 2,
-  "maxPublicHosts": 20,
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-#### Suscribirse a un host (solo modo guest)
-```json
-{
-  "type": "subscribe",
-  "to": "ABC123"  // token corto del host
-}
-```
-
-Respuesta:
-```json
-{
-  "type": "subscribed",
-  "to": "ABC123",
-  "message": "Suscripción exitosa",
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-#### Desuscribirse
-```json
-{
-  "type": "unsubscribe"
-}
-```
-
-### Envío de mensajes
-
-#### Mensaje directo (a cualquier cliente)
-```json
-{
-  "to": "DEF456",
-  "message": "Hola cliente DEF456"
-}
-```
-
-#### Broadcast (host a todos sus subscribers)
-```json
-{
-  "to": "ABC123",  // el host envía a SU PROPIO token
-  "message": "Hola a todos mis guests!"
-}
-```
-
-### Tipos de mensajes recibidos
-
-#### Mensaje directo recibido
-```json
-{
-  "type": "message",
-  "from": "ABC123",
-  "message": "Hola cliente",
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-#### Broadcast recibido (por guests)
-```json
-{
-  "type": "broadcast_message",
-  "from": "ABC123",
-  "message": "Hola a todos mis guests!",
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-#### Notificaciones del sistema
-
-**Nuevo subscriber** (recibido por host):
-```json
-{
-  "type": "new_subscriber",
-  "guest": "DEF456",
-  "subscribersCount": 3,
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-**Subscriber se desuscribe** (recibido por host cuando un guest se desuscribe voluntariamente):
-```json
-{
-  "type": "subscriber_left",
-  "guest": "DEF456",
-  "subscribersCount": 2,
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-**Subscriber desconectado** (recibido por host cuando un guest se desconecta):
-```json
-{
-  "type": "subscriber_disconnected",
-  "guest": "DEF456",
-  "subscribersCount": 2,
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-**Host desconectado** (recibido por guests):
-```json
-{
-  "type": "host_disconnected",
-  "host": "ABC123",
-  "message": "El host se ha desconectado",
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
-
-## Reglas del sistema
-
-1. **Un cliente por token**: Cada token corto está asociado a un solo cliente activo
-2. **Modo único**: Un cliente solo puede estar en modo host o guest a la vez
-3. **Suscripción única**: Un guest solo puede estar suscrito a un host a la vez
-4. **Broadcast automático**: Cuando un host envía un mensaje a su propio token, se envía a todos sus subscribers
-5. **Limpieza automática**: Al cambiar de modo o desconectarse, se limpian las suscripciones automáticamente
-6. **Notificaciones automáticas**: Los hosts son notificados cuando guests se suscriben (`new_subscriber`), se desuscriben (`subscriber_left`) o se desconectan (`subscriber_disconnected`)
-7. **Tokens temporales**: Los tokens se liberan después de 10 minutos de inactividad
-8. **Hosts públicos/privados**: Los hosts pueden ser públicos (aparecen en la lista de hosts públicos) o privados (solo accesibles con su token)
-9. **Lista FIFO de hosts públicos**: Se mantiene una lista de los últimos 20 hosts públicos en orden FIFO (First-In, First-Out)
-10. **Visibilidad por defecto**: Los hosts son privados por defecto a menos que se especifique `"visibility": "public"`
-
-## Ejemplo de flujo
-
-### Escenario: Juego multijugador simple
-
-1. **Jugador 1 (Host)**:
-   - Se conecta al servidor
-   - Establece modo `host`
-   - Comparte su token corto (ej: "ABC123") con otros jugadores
-   - Envía actualizaciones de juego a todos los guests suscritos
-
-2. **Jugador 2 (Guest)**:
-   - Se conecta al servidor
-   - Establece modo `guest`
-   - Se suscribe al host "ABC123"
-   - Recibe actualizaciones del juego
-   - Puede enviar mensajes directos al host u otros guests
-
-3. **Jugador 3 (Guest)**:
-   - Se conecta al servidor
-   - Establece modo `guest`
-   - Se suscribe al mismo host "ABC123"
-   - Recibe las mismas actualizaciones
+Ver [API.md](API.md) para documentación detallada de todos los mensajes y respuestas.
 
 ## Testing
 
-### Test básico de tokens
+Ejecutar el script de prueba:
 ```bash
-node testToken.js
+node testSimple.js
 ```
 
-### Test completo del sistema de modos y suscripciones
-```bash
-node testSubscription.js
+## Reglas del Sistema
+
+### Tokens
+- 4 caracteres alfanuméricos (1-9, A-Z)
+- Asignados automáticamente al conectar
+- Eliminados inmediatamente al desconectar
+- No hay recuperación de conexión (nuevo token al reconectar)
+
+### Mensajes
+- El campo `to` puede ser string (un destino) o array (múltiples destinos)
+- No se pueden enviar mensajes a uno mismo
+- Los mensajes fallan silenciosamente para destinos no encontrados
+
+### Pares de Conexión
+- Se almacenan cuando un mensaje se entrega exitosamente
+- Se usan solo para notificar desconexiones
+- Se eliminan cuando uno de los clientes se desconecta
+
+### Canales Públicos
+- Cada cliente puede publicarse en un canal a la vez
+- Máximo 100 tokens por canal (FIFO)
+- Los tokens expiran después de 20 minutos
+- Cualquier cliente puede listar tokens en cualquier canal
+
+## Estructura del Proyecto
+
+```
+simple-websocket-proxy/
+├── server.js           # Servidor WebSocket principal
+├── tokenManager.js     # Gestión de tokens
+├── testSimple.js       # Script de prueba
+├── API.md             # Documentación de API
+├── definition.txt     # Especificación de requisitos
+├── package.json       # Dependencias
+└── plans/            # Planes y arquitectura
 ```
 
-**Nota**: Asegúrate de que el servidor esté corriendo antes de ejecutar los tests.
+## Comparación con Versión Anterior
 
-## API de estado
+| Característica | Versión Anterior | Versión Simplificada |
+|----------------|------------------|----------------------|
+| **Líneas de código** | 767 | 371 |
+| **Modos host/guest** | Sí | No |
+| **Suscripciones** | Sí | No |
+| **Broadcast** | Sí | No |
+| **Tokens** | 10 minutos de retención | Eliminación inmediata |
+| **UUID/IP validación** | Compleja | Simple |
+| **HTTP endpoints** | /status, /tokens | Ninguno |
+| **Canales públicos** | FIFO 20 hosts | 100 tokens por canal |
+| **Expiración** | 10 minutos | 20 minutos |
 
-### `GET /status`
-```json
-{
-  "status": "online",
-  "activeConnections": 5,
-  "tokenStats": {
-    "activeShortTokens": 5,
-    "releasedShortTokens": 2,
-    "currentShortTokenLength": 4,
-    "expirationTimeMinutes": 10
-  },
-  "activeShortTokens": {
-    "ABC123": {
-      "uuid": "...",
-      "ip": "192.168.1.100",
-      "lastActivity": "2026-02-28T05:00:00.000Z",
-      "assignedAt": "2026-02-28T04:55:00.000Z",
-      "inactiveForMinutes": 0
-    }
-  },
-  "modeStats": {
-    "hosts": 1,
-    "guests": 3,
-    "noMode": 1,
-    "totalSubscriptions": 3,
-    "hostsWithSubscribers": [
-      {
-        "shortToken": "ABC123",
-        "subscribers": ["DEF456", "GHI789", "JKL012"],
-        "subscriberCount": 3
-      }
-    ]
-  },
-  "timestamp": "2026-02-28T05:00:00.000Z"
-}
-```
+## Requisitos
 
-## Configuración
-
-Variables de entorno:
-- `PORT`: Puerto del servidor (default: 4001)
-
-Archivo `.env`:
-```env
-PORT=4001
-```
-
-## Estructura del proyecto
-
-- `server.js` - Servidor principal WebSocket
-- `tokenManager.js` - Gestión de tokens cortos
-- `testToken.js` - Tests del sistema de tokens
-- `testSubscription.js` - Tests del sistema de modos y suscripciones
-- `testPublicHosts.js` - Tests de hosts públicos/privados
-- `package.json` - Dependencias y scripts
-
-## Dependencias
-
-- `ws` - Servidor WebSocket
-- `dotenv` - Manejo de variables de entorno
-- `nodemon` - Recarga automática en desarrollo (dev dependency)
+- Node.js >= 14.0.0
+- Dependencias: `ws`, `dotenv`
 
 ## Licencia
 
