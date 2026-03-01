@@ -316,21 +316,22 @@ wss.on('connection', (ws, req) => {
     if (uuid) {
         // Validar el UUID proporcionado
         if (!isValidUuidForIp(uuid, clientIp)) {
-            console.log(`UUID inválido para IP ${clientIp}: ${uuid}`);
-            ws.close();
-            return;
+            console.log(`UUID inválido para IP ${clientIp}: ${uuid}. Generando nuevo UUID.`);
+            // Tratar como nueva conexión en lugar de rechazar
+            finalUuid = generateUuid(clientIp);
+            console.log(`Nuevo UUID generado: ${finalUuid}`);
+        } else {
+            // Verificar si el UUID ya está en uso (conexión activa)
+            if (activeConnections.has(uuid)) {
+                console.log(`UUID ya en uso: ${uuid}`);
+                ws.close();
+                return;
+            }
+            
+            finalUuid = uuid;
+            isReconnection = true;
+            console.log(`Reconexión con UUID existente: ${finalUuid}`);
         }
-        
-        // Verificar si el UUID ya está en uso (conexión activa)
-        if (activeConnections.has(uuid)) {
-            console.log(`UUID ya en uso: ${uuid}`);
-            ws.close();
-            return;
-        }
-        
-        finalUuid = uuid;
-        isReconnection = true;
-        console.log(`Reconexión con UUID existente: ${finalUuid}`);
     } else {
         // Generar nuevo UUID
         finalUuid = generateUuid(clientIp);
