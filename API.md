@@ -24,8 +24,8 @@ Al conectarse, el servidor responde con:
 
 ## Mensajes
 
-### Campo ID (opcional)
-Los mensajes pueden incluir un campo `id` numérico (0-99) para correlacionar solicitudes con respuestas. Si se incluye en el mensaje de solicitud, el servidor lo incluirá en la respuesta correspondiente.
+### Campos ID (opcionales)
+Los mensajes pueden incluir campos `id` o `messageId` (o ambos) para correlacionar solicitudes con respuestas. Si se incluyen en el mensaje de solicitud, el servidor los incluirá en la respuesta correspondiente.
 
 Ejemplo de mensaje con ID:
 ```json
@@ -36,10 +36,30 @@ Ejemplo de mensaje con ID:
 }
 ```
 
-El servidor responderá con el mismo ID:
+Ejemplo de mensaje con messageId:
+```json
+{
+  "messageId": 99,
+  "to": ["ABCD"],
+  "message": "Texto del mensaje"
+}
+```
+
+Ejemplo de mensaje con ambos campos:
 ```json
 {
   "id": 42,
+  "messageId": 99,
+  "to": ["ABCD"],
+  "message": "Texto del mensaje"
+}
+```
+
+El servidor responderá con los mismos campos ID:
+```json
+{
+  "id": 42,
+  "messageId": 99,
   "type": "message_sent",
   "sent": 1,
   "total": 1,
@@ -65,7 +85,7 @@ El servidor responderá con el mismo ID:
 }
 ```
 
-*Nota: Si el mensaje original incluye un campo `id`, la respuesta también lo incluirá.*
+*Nota: Si el mensaje original incluye campos `id` o `messageId` (o ambos), la respuesta también los incluirá.*
 
 **Respuesta con errores (algunos destinos no encontrados):**
 ```json

@@ -160,6 +160,35 @@ function removeConnectionPair(token1, token2) {
     return { success: true, pair: pairKey };
 }
 
+// Helper functions para manejar IDs de mensajes
+/**
+ * Extraer valores de ID de un objeto de mensaje
+ * @param {Object} message - El mensaje entrante
+ * @returns {Object} Objeto con propiedades id y messageId (undefined si no están presentes)
+ */
+function extractMessageIds(message) {
+    return {
+        id: message.id,
+        messageId: message.messageId
+    };
+}
+
+/**
+ * Aplicar campos ID de un mensaje a un objeto de respuesta
+ * @param {Object} response - El objeto de respuesta a modificar
+ * @param {Object} message - El mensaje original
+ * @returns {Object} El objeto de respuesta modificado
+ */
+function applyMessageIds(response, message) {
+    if (message.id !== undefined) {
+        response.id = message.id;
+    }
+    if (message.messageId !== undefined) {
+        response.messageId = message.messageId;
+    }
+    return response;
+}
+
 // Crear servidor HTTP básico (solo para WebSocket upgrade)
 const server = http.createServer((req, res) => {
     // Para cualquier ruta, responder 404 (no necesitamos endpoints HTTP)
@@ -225,9 +254,7 @@ wss.on('connection', (ws, req) => {
                 };
                 
                 // Incluir ID del mensaje original si existe
-                if (message.id !== undefined) {
-                    errorResponse.id = message.id;
-                }
+                applyMessageIds(errorResponse, message);
                 
                 ws.send(JSON.stringify(errorResponse));
                 return;
@@ -243,9 +270,7 @@ wss.on('connection', (ws, req) => {
                 };
                 
                 // Incluir ID del mensaje original si existe
-                if (message.id !== undefined) {
-                    errorResponse.id = message.id;
-                }
+                applyMessageIds(errorResponse, message);
                 
                 ws.send(JSON.stringify(errorResponse));
                 return;
@@ -259,9 +284,7 @@ wss.on('connection', (ws, req) => {
                 };
                 
                 // Incluir ID del mensaje original si existe
-                if (message.id !== undefined) {
-                    errorResponse.id = message.id;
-                }
+                applyMessageIds(errorResponse, message);
                 
                 ws.send(JSON.stringify(errorResponse));
                 return;
@@ -307,9 +330,7 @@ wss.on('connection', (ws, req) => {
             }
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                response.id = message.id;
-            }
+            applyMessageIds(response, message);
             
             ws.send(JSON.stringify(response));
             
@@ -335,9 +356,7 @@ wss.on('connection', (ws, req) => {
             };
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                errorResponse.id = message.id;
-            }
+            applyMessageIds(errorResponse, message);
             
             ws.send(JSON.stringify(errorResponse));
             return;
@@ -359,9 +378,7 @@ wss.on('connection', (ws, req) => {
         };
         
         // Incluir ID del mensaje original si existe
-        if (message.id !== undefined) {
-            response.id = message.id;
-        }
+        applyMessageIds(response, message);
         
         ws.send(JSON.stringify(response));
         
@@ -378,9 +395,7 @@ wss.on('connection', (ws, req) => {
             };
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                errorResponse.id = message.id;
-            }
+            applyMessageIds(errorResponse, message);
             
             ws.send(JSON.stringify(errorResponse));
             return;
@@ -399,9 +414,7 @@ wss.on('connection', (ws, req) => {
         };
         
         // Incluir ID del mensaje original si existe
-        if (message.id !== undefined) {
-            response.id = message.id;
-        }
+        applyMessageIds(response, message);
         
         ws.send(JSON.stringify(response));
         
@@ -418,9 +431,7 @@ wss.on('connection', (ws, req) => {
             };
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                errorResponse.id = message.id;
-            }
+            applyMessageIds(errorResponse, message);
             
             ws.send(JSON.stringify(errorResponse));
             return;
@@ -434,9 +445,7 @@ wss.on('connection', (ws, req) => {
             };
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                errorResponse.id = message.id;
-            }
+            applyMessageIds(errorResponse, message);
             
             ws.send(JSON.stringify(errorResponse));
             return;
@@ -451,9 +460,7 @@ wss.on('connection', (ws, req) => {
             };
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                errorResponse.id = message.id;
-            }
+            applyMessageIds(errorResponse, message);
             
             ws.send(JSON.stringify(errorResponse));
             return;
@@ -471,9 +478,7 @@ wss.on('connection', (ws, req) => {
             };
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                response.id = message.id;
-            }
+            applyMessageIds(response, message);
             
             ws.send(JSON.stringify(response));
             
@@ -485,9 +490,7 @@ wss.on('connection', (ws, req) => {
             };
             
             // Incluir ID del mensaje original si existe
-            if (message.id !== undefined) {
-                errorResponse.id = message.id;
-            }
+            applyMessageIds(errorResponse, message);
             
             ws.send(JSON.stringify(errorResponse));
         }
