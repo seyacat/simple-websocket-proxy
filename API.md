@@ -24,6 +24,29 @@ Al conectarse, el servidor responde con:
 
 ## Mensajes
 
+### Campo ID (opcional)
+Los mensajes pueden incluir un campo `id` numérico (0-99) para correlacionar solicitudes con respuestas. Si se incluye en el mensaje de solicitud, el servidor lo incluirá en la respuesta correspondiente.
+
+Ejemplo de mensaje con ID:
+```json
+{
+  "id": 42,
+  "to": ["ABCD"],
+  "message": "Texto del mensaje"
+}
+```
+
+El servidor responderá con el mismo ID:
+```json
+{
+  "id": 42,
+  "type": "message_sent",
+  "sent": 1,
+  "total": 1,
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
 ### Enviar mensaje a uno o múltiples destinos
 ```json
 {
@@ -41,6 +64,8 @@ Al conectarse, el servidor responde con:
   "timestamp": "2026-03-01T04:33:38.141Z"
 }
 ```
+
+*Nota: Si el mensaje original incluye un campo `id`, la respuesta también lo incluirá.*
 
 **Respuesta con errores (algunos destinos no encontrados):**
 ```json

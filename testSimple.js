@@ -440,6 +440,53 @@ async function test8() {
     return true;
 }
 
+// Test 9: Campo ID en mensajes
+async function test9() {
+    console.log('\nTest 9: Campo ID en mensajes');
+    
+    // Enviar mensaje con ID
+    const response = await sendAndWait(client1, {
+        id: 77,
+        to: [token2],
+        message: 'Mensaje con ID 77'
+    }, 'message_sent');
+    
+    console.log(`  ✓ Respuesta recibida con ID: ${response.id}`);
+    if (response.id === 77) {
+        console.log('  ✓ ID correctamente devuelto por el servidor');
+    } else {
+        throw new Error(`ID incorrecto. Esperado: 77, Recibido: ${response.id}`);
+    }
+    
+    // Verificar que el mensaje llegó al destinatario
+    const messagePromise = new Promise((resolve) => {
+        const handler = (data) => {
+            const msg = JSON.parse(data.toString());
+            if (msg.type === 'message' && msg.from === token1) {
+                client2.removeListener('message', handler);
+                resolve(msg);
+            }
+        };
+        client2.on('message', handler);
+    });
+    
+    const receivedMsg = await Promise.race([
+        messagePromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout esperando mensaje')), 2000))
+    ]);
+    
+    console.log(`  ✓ Mensaje recibido por cliente 2: "${receivedMsg.message}"`);
+    
+    // Verificar que el ID está en el mensaje recibido
+    if (receivedMsg.id === 77) {
+        console.log('  ✓ ID correctamente incluido en mensaje recibido');
+    } else {
+        console.log(`  ⚠ ID no incluido en mensaje recibido: ${receivedMsg.id}`);
+    }
+    
+    return true;
+}
+
 // Ejecutar todos los tests
 async function runAllTests() {
     try {

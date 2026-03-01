@@ -219,10 +219,17 @@ wss.on('connection', (ws, req) => {
             
             // Mensaje regular (to + message)
             if (!message.to || !message.message) {
-                ws.send(JSON.stringify({
+                const errorResponse = {
                     type: 'error',
                     error: 'Formato de mensaje inválido. Debe contener "to" y "message" o "type" para operaciones especiales'
-                }));
+                };
+                
+                // Incluir ID del mensaje original si existe
+                if (message.id !== undefined) {
+                    errorResponse.id = message.id;
+                }
+                
+                ws.send(JSON.stringify(errorResponse));
                 return;
             }
             
@@ -230,19 +237,33 @@ wss.on('connection', (ws, req) => {
             const targetTokens = Array.isArray(message.to) ? message.to : [message.to];
             
             if (targetTokens.length === 0) {
-                ws.send(JSON.stringify({
+                const errorResponse = {
                     type: 'error',
                     error: 'El campo "to" debe contener al menos un token destino'
-                }));
+                };
+                
+                // Incluir ID del mensaje original si existe
+                if (message.id !== undefined) {
+                    errorResponse.id = message.id;
+                }
+                
+                ws.send(JSON.stringify(errorResponse));
                 return;
             }
             
             // Verificar que el remitente no se incluya a sí mismo
             if (targetTokens.includes(token)) {
-                ws.send(JSON.stringify({
+                const errorResponse = {
                     type: 'error',
                     error: 'No puedes enviarte mensajes a ti mismo'
-                }));
+                };
+                
+                // Incluir ID del mensaje original si existe
+                if (message.id !== undefined) {
+                    errorResponse.id = message.id;
+                }
+                
+                ws.send(JSON.stringify(errorResponse));
                 return;
             }
             
@@ -285,6 +306,11 @@ wss.on('connection', (ws, req) => {
                 response.failed = failedTokens;
             }
             
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                response.id = message.id;
+            }
+            
             ws.send(JSON.stringify(response));
             
             console.log(`Mensaje de ${token} a ${sentCount}/${targetTokens.length} destinos: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
@@ -303,10 +329,17 @@ wss.on('connection', (ws, req) => {
         const channel = message.channel;
         
         if (!channel || typeof channel !== 'string') {
-            ws.send(JSON.stringify({
+            const errorResponse = {
                 type: 'error',
                 error: 'Nombre de canal requerido (string)'
-            }));
+            };
+            
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                errorResponse.id = message.id;
+            }
+            
+            ws.send(JSON.stringify(errorResponse));
             return;
         }
         
@@ -319,11 +352,18 @@ wss.on('connection', (ws, req) => {
         // Agregar a la lista pública del canal
         addToPublicChannel(channel, token);
         
-        ws.send(JSON.stringify({
+        const response = {
             type: 'published',
             channel: channel,
             timestamp: new Date().toISOString()
-        }));
+        };
+        
+        // Incluir ID del mensaje original si existe
+        if (message.id !== undefined) {
+            response.id = message.id;
+        }
+        
+        ws.send(JSON.stringify(response));
         
         console.log(`Cliente ${token} publicado en canal: ${channel}`);
     }
@@ -332,24 +372,38 @@ wss.on('connection', (ws, req) => {
         const channel = message.channel;
         
         if (!channel || typeof channel !== 'string') {
-            ws.send(JSON.stringify({
+            const errorResponse = {
                 type: 'error',
                 error: 'Nombre de canal requerido (string)'
-            }));
+            };
+            
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                errorResponse.id = message.id;
+            }
+            
+            ws.send(JSON.stringify(errorResponse));
             return;
         }
         
         // Obtener tokens del canal (ya filtrados por expiración)
         const tokens = getChannelTokens(channel);
         
-        ws.send(JSON.stringify({
+        const response = {
             type: 'channel_list',
             channel: channel,
             tokens: tokens,
             count: tokens.length,
             maxEntries: MAX_CHANNEL_ENTRIES,
             timestamp: new Date().toISOString()
-        }));
+        };
+        
+        // Incluir ID del mensaje original si existe
+        if (message.id !== undefined) {
+            response.id = message.id;
+        }
+        
+        ws.send(JSON.stringify(response));
         
         console.log(`Cliente ${token} solicitó lista del canal ${channel}: ${tokens.length} tokens`);
     }
@@ -358,29 +412,50 @@ wss.on('connection', (ws, req) => {
         const targetToken = message.target;
         
         if (!targetToken || typeof targetToken !== 'string') {
-            ws.send(JSON.stringify({
+            const errorResponse = {
                 type: 'error',
                 error: 'Token destino requerido (string)'
-            }));
+            };
+            
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                errorResponse.id = message.id;
+            }
+            
+            ws.send(JSON.stringify(errorResponse));
             return;
         }
         
         // Verificar que el token destino no sea el mismo
         if (targetToken === token) {
-            ws.send(JSON.stringify({
+            const errorResponse = {
                 type: 'error',
                 error: 'No puedes desconectarte de ti mismo'
-            }));
+            };
+            
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                errorResponse.id = message.id;
+            }
+            
+            ws.send(JSON.stringify(errorResponse));
             return;
         }
         
         // Verificar que el token destino exista y esté conectado
         const targetConn = activeConnections.get(targetToken);
         if (!targetConn) {
-            ws.send(JSON.stringify({
+            const errorResponse = {
                 type: 'error',
                 error: `Token destino ${targetToken} no encontrado o no conectado`
-            }));
+            };
+            
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                errorResponse.id = message.id;
+            }
+            
+            ws.send(JSON.stringify(errorResponse));
             return;
         }
         
@@ -389,18 +464,32 @@ wss.on('connection', (ws, req) => {
         
         if (result.success) {
             // Enviar confirmación al cliente que solicitó la desconexión
-            ws.send(JSON.stringify({
+            const response = {
                 type: 'disconnect_confirmation',
                 target: targetToken,
                 timestamp: new Date().toISOString()
-            }));
+            };
+            
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                response.id = message.id;
+            }
+            
+            ws.send(JSON.stringify(response));
             
             console.log(`Cliente ${token} desconectó manualmente de ${targetToken}`);
         } else {
-            ws.send(JSON.stringify({
+            const errorResponse = {
                 type: 'error',
                 error: result.error
-            }));
+            };
+            
+            // Incluir ID del mensaje original si existe
+            if (message.id !== undefined) {
+                errorResponse.id = message.id;
+            }
+            
+            ws.send(JSON.stringify(errorResponse));
         }
     }
     

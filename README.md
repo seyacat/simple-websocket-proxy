@@ -185,6 +185,7 @@ node testSimple.js
 - El campo `to` puede ser string (un destino) o array (múltiples destinos)
 - No se pueden enviar mensajes a uno mismo
 - Los mensajes fallan silenciosamente para destinos no encontrados
+- Campo `id` opcional (0-99) para correlacionar solicitudes con respuestas
 
 ### Pares de Conexión
 - Se almacenan cuando un mensaje se entrega exitosamente
