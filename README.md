@@ -200,7 +200,17 @@ Respuesta:
 }
 ```
 
-**Subscriber desconectado** (recibido por host):
+**Subscriber se desuscribe** (recibido por host cuando un guest se desuscribe voluntariamente):
+```json
+{
+  "type": "subscriber_left",
+  "guest": "DEF456",
+  "subscribersCount": 2,
+  "timestamp": "2026-02-28T05:00:00.000Z"
+}
+```
+
+**Subscriber desconectado** (recibido por host cuando un guest se desconecta):
 ```json
 {
   "type": "subscriber_disconnected",
@@ -227,10 +237,11 @@ Respuesta:
 3. **Suscripción única**: Un guest solo puede estar suscrito a un host a la vez
 4. **Broadcast automático**: Cuando un host envía un mensaje a su propio token, se envía a todos sus subscribers
 5. **Limpieza automática**: Al cambiar de modo o desconectarse, se limpian las suscripciones automáticamente
-6. **Tokens temporales**: Los tokens se liberan después de 10 minutos de inactividad
-7. **Hosts públicos/privados**: Los hosts pueden ser públicos (aparecen en la lista de hosts públicos) o privados (solo accesibles con su token)
-8. **Lista FIFO de hosts públicos**: Se mantiene una lista de los últimos 20 hosts públicos en orden FIFO (First-In, First-Out)
-9. **Visibilidad por defecto**: Los hosts son privados por defecto a menos que se especifique `"visibility": "public"`
+6. **Notificaciones automáticas**: Los hosts son notificados cuando guests se suscriben (`new_subscriber`), se desuscriben (`subscriber_left`) o se desconectan (`subscriber_disconnected`)
+7. **Tokens temporales**: Los tokens se liberan después de 10 minutos de inactividad
+8. **Hosts públicos/privados**: Los hosts pueden ser públicos (aparecen en la lista de hosts públicos) o privados (solo accesibles con su token)
+9. **Lista FIFO de hosts públicos**: Se mantiene una lista de los últimos 20 hosts públicos en orden FIFO (First-In, First-Out)
+10. **Visibilidad por defecto**: Los hosts son privados por defecto a menos que se especifique `"visibility": "public"`
 
 ## Ejemplo de flujo
 

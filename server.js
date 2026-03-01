@@ -151,6 +151,13 @@ function unsubscribeGuest(guestUuid) {
     
     if (hostConn) {
         hostConn.subscribers.delete(guestConn.shortToken);
+        // Notificar al host sobre la desuscripción
+        hostConn.ws.send(JSON.stringify({
+            type: 'subscriber_left',
+            guest: guestConn.shortToken,
+            subscribersCount: hostConn.subscribers.size,
+            timestamp: new Date().toISOString()
+        }));
     }
     
     guestConn.subscribedTo = null;
@@ -591,17 +598,6 @@ wss.on('connection', (ws, req) => {
                 timestamp: new Date().toISOString()
             }));
             
-            // Notificar al host sobre la desuscripción
-            const hostConn = getConnectionByShortToken(hostShortToken);
-            if (hostConn) {
-                hostConn.ws.send(JSON.stringify({
-                    type: 'subscriber_left',
-                    guest: conn.shortToken,
-                    subscribersCount: hostConn.subscribers.size,
-                    timestamp: new Date().toISOString()
-                }));
-            }
-            
             console.log(`Guest ${conn.shortToken} desuscrito de host ${hostShortToken}`);
         } else {
             ws.send(JSON.stringify({
@@ -658,6 +654,8 @@ wss.on('connection', (ws, req) => {
                         timestamp: new Date().toISOString()
                     }));
                 }
+                // Limpiar la suscripción del guest
+                conn.subscribedTo = null;
             } else if (conn.mode === 'host') {
                 // Host desconectado: notificar a todos los subscribers
                 notifyHostDisconnection(conn.shortToken);
