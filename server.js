@@ -393,7 +393,7 @@ wss.on('connection', (ws, req) => {
             // Actualizar actividad del token corto
             tokenManager.updateShortTokenActivity(shortToken);
             
-            // Manejar mensajes de tipo especial (set_mode, subscribe, unsubscribe, list_public_hosts)
+            // Manejar mensajes de tipo especial (set_mode, subscribe, unsubscribe, list_public_hosts, broadcast)
             if (message.type === 'set_mode') {
                 handleSetModeMessage(ws, message);
                 return;
@@ -405,6 +405,10 @@ wss.on('connection', (ws, req) => {
                 return;
             } else if (message.type === 'list_public_hosts') {
                 handleListPublicHostsMessage(ws);
+                return;
+            } else if (message.type === 'broadcast') {
+                // Manejar broadcast explícito
+                handleBroadcastMessage(ws, message);
                 return;
             }
             
@@ -422,20 +426,14 @@ wss.on('connection', (ws, req) => {
             const senderUuid = ws.uuid;
             const senderConn = activeConnections.get(senderUuid);
 
-            // Verificar si es un broadcast (host enviando a su propio token)
-            if (targetShortToken === senderShortToken && senderConn && senderConn.mode === 'host') {
-                // Es un broadcast del host a sus subscribers
-                const sentCount = broadcastToSubscribers(senderShortToken, message.message, senderShortToken);
-                
-                // Confirmación al host
+            // NOTA: El broadcast implícito (enviarse mensajes a sí mismo) ya no está soportado
+            // En su lugar, usar el comando explícito 'broadcast'
+            // Verificar si alguien intenta enviarse un mensaje a sí mismo (error común)
+            if (targetShortToken === senderShortToken) {
                 ws.send(JSON.stringify({
-                    type: 'broadcast_sent',
-                    to: 'all_subscribers',
-                    subscribersCount: sentCount,
-                    timestamp: new Date().toISOString()
+                    type: 'error',
+                    error: 'No puedes enviarte mensajes a ti mismo. Para broadcast, usa el comando "broadcast"'
                 }));
-                
-                console.log(`Broadcast de ${senderShortToken} a ${sentCount} subscribers: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
                 return;
             }
 
@@ -633,6 +631,43 @@ wss.on('connection', (ws, req) => {
         }));
         
         console.log(`Cliente ${ws.shortToken} solicitó lista de hosts públicos (${hostsInfo.length} hosts)`);
+    }
+
+    function handleBroadcastMessage(ws, message) {
+        const senderShortToken = ws.shortToken;
+        const senderUuid = ws.uuid;
+        const senderConn = activeConnections.get(senderUuid);
+        
+        // Validar que el remitente sea host
+        if (!senderConn || senderConn.mode !== 'host') {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Solo hosts pueden hacer broadcast'
+            }));
+            return;
+        }
+        
+        // Validar que el mensaje tenga contenido
+        if (!message.message) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Mensaje de broadcast vacío'
+            }));
+            return;
+        }
+        
+        // Hacer broadcast a todos los subscribers
+        const sentCount = broadcastToSubscribers(senderShortToken, message.message, senderShortToken);
+        
+        // Confirmación al host
+        ws.send(JSON.stringify({
+            type: 'broadcast_sent',
+            to: 'all_subscribers',
+            subscribersCount: sentCount,
+            timestamp: new Date().toISOString()
+        }));
+        
+        console.log(`Broadcast explícito de ${senderShortToken} a ${sentCount} subscribers: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
     }
 
     // Manejar cierre de conexión

@@ -150,9 +150,9 @@ async function test3() {
         }
     });
     
-    // Host envía broadcast (mensaje a su propio token)
+    // Host envía broadcast usando comando explícito
     const broadcastResponse = await sendAndWait(hostWs, {
-        to: hostToken,
+        type: 'broadcast',
         message: broadcastMessage
     }, 'broadcast_sent');
     
@@ -225,7 +225,7 @@ async function test4() {
     });
     
     const broadcastResponse = await sendAndWait(hostWs, {
-        to: hostToken,
+        type: 'broadcast',
         message: broadcastMessage
     }, 'broadcast_sent');
     
@@ -284,7 +284,7 @@ async function test5() {
     
     // Host envía otro broadcast
     await sendAndWait(hostWs, {
-        to: hostToken,
+        type: 'broadcast',
         message: 'Este mensaje solo debería llegar a guest 2'
     }, 'broadcast_sent');
     
