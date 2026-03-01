@@ -82,7 +82,8 @@ function setClientMode(uuid, mode, visibility = 'private') {
         unsubscribeGuest(uuid);
     } else if (conn.mode === 'host') {
         // Si era host, notificar a todos los subscribers que se desconectó
-        notifyHostDisconnection(conn.shortToken);
+        // Usar 'changed_mode' como razón cuando el host cambia de modo intencionalmente
+        notifyHostDisconnection(conn.shortToken, 'changed_mode');
         conn.subscribers.clear();
         
         // Remover de la lista de hosts públicos si estaba
@@ -165,9 +166,16 @@ function unsubscribeGuest(guestUuid) {
 }
 
 // Notificar a todos los guests que su host se desconectó
-function notifyHostDisconnection(hostShortToken) {
+function notifyHostDisconnection(hostShortToken, reason = 'disconnected') {
     const hostConn = getConnectionByShortToken(hostShortToken);
     if (!hostConn) return;
+    
+    let message = 'El host se ha desconectado';
+    if (reason === 'closed_game') {
+        message = 'El host ha cerrado el juego';
+    } else if (reason === 'changed_mode') {
+        message = 'El host ha cambiado de modo';
+    }
     
     for (const guestToken of hostConn.subscribers) {
         const guestUuid = tokenManager.getUuidByShortToken(guestToken);
@@ -179,7 +187,8 @@ function notifyHostDisconnection(hostShortToken) {
             guestConn.ws.send(JSON.stringify({
                 type: 'host_disconnected',
                 host: hostShortToken,
-                message: 'El host se ha desconectado',
+                message: message,
+                reason: reason,
                 timestamp: new Date().toISOString()
             }));
         }
@@ -489,10 +498,11 @@ wss.on('connection', (ws, req) => {
         const uuid = ws.uuid;
         const mode = message.mode;
         
-        if (mode !== 'host' && mode !== 'guest') {
+        // Permitir null para volver al lobby
+        if (mode !== null && mode !== 'host' && mode !== 'guest') {
             ws.send(JSON.stringify({
                 type: 'error',
-                error: 'Modo inválido. Debe ser "host" o "guest"'
+                error: 'Modo inválido. Debe ser "host", "guest" o null'
             }));
             return;
         }
@@ -694,7 +704,8 @@ wss.on('connection', (ws, req) => {
                 conn.subscribedTo = null;
             } else if (conn.mode === 'host') {
                 // Host desconectado: notificar a todos los subscribers
-                notifyHostDisconnection(conn.shortToken);
+                // Usar 'disconnected' como razón cuando el host se desconecta forzosamente
+                notifyHostDisconnection(conn.shortToken, 'disconnected');
                 
                 // Remover de la lista de hosts públicos si estaba
                 removeFromPublicHosts(conn.shortToken);
