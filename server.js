@@ -334,8 +334,7 @@ wss.on('connection', (ws, req) => {
                 targetConn.ws.send(JSON.stringify({
                     type: 'message',
                     from: token,
-                    message: message.message,
-                    timestamp: new Date().toISOString()
+                    message: message.message
                 }));
                 
                 // Registrar el par de conexión
@@ -345,24 +344,17 @@ wss.on('connection', (ws, req) => {
                 sentCount++;
             }
             
-            // Confirmación al remitente
-            const response = {
-                type: 'message_sent',
-                sent: sentCount,
-                total: targetTokens.length,
-                timestamp: new Date().toISOString()
-            };
-            
+            // Confirmación al remitente (solo si hay fallos)
             if (failedTokens.length > 0) {
-                response.failed = failedTokens;
+                const response = {
+                    type: 'message_sent',
+                    sent: sentCount,
+                    total: targetTokens.length,
+                    failed: failedTokens
+                };
+                applyMessageIds(response, message);
+                ws.send(JSON.stringify(response));
             }
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(response, message);
-            
-            ws.send(JSON.stringify(response));
-            
-            console.log(`Mensaje de ${token} a ${sentCount}/${targetTokens.length} destinos: "${message.message.substring(0, 50)}${message.message.length > 50 ? '...' : ''}"`);
             
         } catch (error) {
             console.error('Error procesando mensaje:', error);
