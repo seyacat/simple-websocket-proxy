@@ -47,6 +47,31 @@ function addToPublicChannel(channel, token) {
     }
 }
 
+// Remover entrada de un canal público
+function removeFromPublicChannel(channel, token) {
+    if (!publicChannels.has(channel)) return;
+    const entries = publicChannels.get(channel);
+    const validEntries = entries.filter(entry => entry.token !== token);
+    
+    if (validEntries.length === 0) {
+        publicChannels.delete(channel);
+    } else {
+        publicChannels.set(channel, validEntries);
+    }
+}
+
+// Remover entrada de todos los canales públicos
+function removeFromAllPublicChannels(token) {
+    for (const [channel, entries] of publicChannels) {
+        const validEntries = entries.filter(entry => entry.token !== token);
+        if (validEntries.length === 0) {
+            publicChannels.delete(channel);
+        } else if (validEntries.length !== entries.length) {
+            publicChannels.set(channel, validEntries);
+        }
+    }
+}
+
 // Obtener tokens no expirados de un canal
 function getChannelTokens(channel) {
     if (!publicChannels.has(channel)) {
@@ -234,9 +259,12 @@ wss.on('connection', (ws, req) => {
             // Actualizar actividad del token
             tokenManager.updateTokenActivity(token);
             
-            // Manejar mensajes de tipo especial (publish, list, disconnect)
+            // Manejar mensajes de tipo especial (publish, unpublish, list, disconnect)
             if (message.type === 'publish') {
                 handlePublishMessage(ws, message);
+                return;
+            } else if (message.type === 'unpublish') {
+                handleUnpublishMessage(ws, message);
                 return;
             } else if (message.type === 'list') {
                 handleListMessage(ws, message);
@@ -385,6 +413,35 @@ wss.on('connection', (ws, req) => {
         console.log(`Cliente ${token} publicado en canal: ${channel}`);
     }
     
+    function handleUnpublishMessage(ws, message) {
+        const channel = message.channel;
+        
+        if (!channel || typeof channel !== 'string') {
+            const errorResponse = {
+                type: 'error',
+                error: 'Nombre de canal requerido (string)'
+            };
+            
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+        
+        // Remover de la lista pública del canal
+        removeFromPublicChannel(channel, token);
+        
+        const response = {
+            type: 'unpublished',
+            channel: channel,
+            timestamp: new Date().toISOString()
+        };
+        
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+        
+        console.log(`Cliente ${token} despublicado del canal: ${channel}`);
+    }
+    
     function handleListMessage(ws, message) {
         const channel = message.channel;
         
@@ -508,7 +565,8 @@ wss.on('connection', (ws, req) => {
             // Liberar token inmediatamente
             tokenManager.releaseToken(token);
             
-            // Remover de todos los canales públicos (se limpiará en la próxima limpieza)
+            // Remover de todos los canales públicos inmediatamente
+            removeFromAllPublicChannels(token);
             
             console.log(`Cliente desconectado - Token: ${token}. Notificados: ${notifiedCount} clientes. Total activos: ${activeConnections.size}`);
         }
