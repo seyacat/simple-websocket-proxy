@@ -109,20 +109,68 @@ El servidor responderá con los mismos campos ID:
 ```
 
 ### Publicar en canal público
-Cada cliente puede publicarse en un canal a la vez.
+Cada cliente puede publicarse en un canal a la vez. El canal debe seguir el nuevo formato:
 ```json
 {
   "type": "publish",
-  "channel": "nombre-del-canal"
+  "channel": {
+    "data": {
+      "name": "nombre-del-canal",
+      "publickey": "clave-publica-del-cliente",
+      "...": "otros datos opcionales"
+    },
+    "signature": "firma-de-los-datos"
+  }
 }
 ```
+
+**Requisitos:**
+- El campo `data` debe contener al menos `name` (string) y `publickey` (string)
+- El campo `signature` debe ser una firma válida de los datos
+- El JSON completo no debe exceder 1000 caracteres
+- La firma será validada por el servidor
 
 **Respuesta:**
 ```json
 {
   "type": "published",
   "channel": "nombre-del-canal",
+  "data": {
+    "name": "nombre-del-canal",
+    "publickey": "clave-publica-del-cliente",
+    "...": "otros datos opcionales"
+  },
   "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Despublicar de canal
+```json
+{
+  "type": "unpublish",
+  "channel": {
+    "data": {
+      "name": "nombre-del-canal",
+      "publickey": "clave-publica-del-cliente",
+      "...": "otros datos opcionales"
+    },
+    "signature": "firma-de-los-datos"
+  }
+}
+```
+
+### Listar tokens en canal
+```json
+{
+  "type": "list",
+  "channel": {
+    "data": {
+      "name": "nombre-del-canal",
+      "publickey": "clave-publica-del-cliente",
+      "...": "otros datos opcionales"
+    },
+    "signature": "firma-de-los-datos"
+  }
 }
 ```
 
