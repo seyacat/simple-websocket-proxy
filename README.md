@@ -105,11 +105,59 @@ El servidor se inicia en `ws://localhost:4001` por defecto (configurable con var
 }
 ```
 
+### Notificación de entrada al canal
+Emitida a los demás miembros del canal cuando alguien hace `publish`:
+```json
+{
+  "type": "joined",
+  "token": "ABCD",
+  "channel": "nombre-del-canal",
+  "timestamp": "2026-05-01T12:00:00.000Z"
+}
+```
+
+### Notificación de salida del canal
+Emitida a los miembros restantes cuando alguien hace `unpublish`:
+```json
+{
+  "type": "left",
+  "token": "ABCD",
+  "channel": "nombre-del-canal",
+  "timestamp": "2026-05-01T12:00:00.000Z"
+}
+```
+
 ### Notificación de desconexión
+Cuando un cliente se cierra, el servidor emite `disconnected` a:
+- **Cada miembro de cada canal** en el que el cliente estaba publicado (incluye campo `channel`).
+- **Pares emparejados** que no comparten canal (sin campo `channel`).
+
+Forma con canal (broadcast por canal):
 ```json
 {
   "type": "disconnected",
   "token": "ABCD",
+  "channel": "nombre-del-canal",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+Forma legacy (par sin canal compartido o `disconnect` manual):
+```json
+{
+  "type": "disconnected",
+  "token": "ABCD",
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+### Conteo de canal (consulta ligera)
+```json
+{
+  "type": "channel_count",
+  "channel": "nombre-del-canal",
+  "count": 3,
+  "maxEntries": 100,
   "timestamp": "2026-03-01T04:33:38.141Z"
 }
 ```
@@ -162,16 +210,30 @@ ws://localhost:4001/
 }
 ```
 
+### Contar miembros en canal (sin firma)
+Devuelve solo el número de tokens activos en el canal — útil para badges de presencia y polling barato.
+```json
+{
+  "type": "channel_count",
+  "channel": "nombre-del-canal"
+}
+```
+
 ## API Completa
 
 Ver [API.md](API.md) para documentación detallada de todos los mensajes y respuestas.
 
 ## Testing
 
-Ejecutar el script de prueba:
+Suite con Vitest cubre tokens, mensajería, canales (publish/unpublish/list/channel_count), presencia (`joined`/`left`) y desconexiones (broadcast por canal, pareo, dedup, manual `disconnect`).
+
 ```bash
-node testSimple.js
+npm install
+npm test            # corrida única
+npm run test:watch  # modo watch
 ```
+
+Los tests arrancan su propia instancia del servidor en un puerto OS-asignado, no requieren un servidor corriendo aparte.
 
 ## Reglas del Sistema
 
@@ -204,11 +266,11 @@ node testSimple.js
 simple-websocket-proxy/
 ├── server.js           # Servidor WebSocket principal
 ├── tokenManager.js     # Gestión de tokens
-├── testSimple.js       # Script de prueba
+├── test/               # Suite Vitest (core, channels, presence, disconnect)
+├── vitest.config.js    # Configuración de tests
 ├── API.md             # Documentación de API
-├── definition.txt     # Especificación de requisitos
 ├── package.json       # Dependencias
-└── plans/            # Planes y arquitectura
+└── README.md          # Este archivo
 ```
 
 ## Comparación con Versión Anterior

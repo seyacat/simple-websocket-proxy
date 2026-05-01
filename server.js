@@ -121,19 +121,24 @@ function cleanupExpiredChannelEntries() {
 }
 
 // Notificar a clientes pareados sobre desconexión
-function notifyPairedClients(disconnectedToken) {
+// skipTokens: Set de tokens a excluir (ya notificados por broadcast de canal)
+function notifyPairedClients(disconnectedToken, skipTokens = new Set()) {
     const tokensToNotify = new Set();
-    
+    const pairsToRemove = [];
+
     // Buscar todos los pares que incluyen el token desconectado
     for (const pairKey of connectionPairs) {
         const [token1, token2] = pairKey.split(':');
         if (token1 === disconnectedToken || token2 === disconnectedToken) {
             const otherToken = token1 === disconnectedToken ? token2 : token1;
-            tokensToNotify.add(otherToken);
+            pairsToRemove.push(pairKey);
+            if (!skipTokens.has(otherToken)) {
+                tokensToNotify.add(otherToken);
+            }
         }
     }
-    
-    // Enviar notificación a cada cliente pareado
+
+    // Enviar notificación a cada cliente pareado no notificado aún
     for (const token of tokensToNotify) {
         const conn = activeConnections.get(token);
         if (conn && conn.ws.readyState === WebSocket.OPEN) {
@@ -143,13 +148,97 @@ function notifyPairedClients(disconnectedToken) {
                 timestamp: new Date().toISOString()
             }));
         }
-        
-        // Remover el par de connectionPairs
-        const pairKey = createPairKey(disconnectedToken, token);
+    }
+
+    // Limpiar todos los pares (incluso los ya notificados por canal)
+    for (const pairKey of pairsToRemove) {
         connectionPairs.delete(pairKey);
     }
-    
+
     return tokensToNotify.size;
+}
+
+// Notificar a los miembros existentes del canal que un token nuevo se publicó
+function notifyChannelMembersOfJoin(joiningToken, channelName) {
+    const entries = publicChannels.get(channelName);
+    if (!entries) return 0;
+
+    const timestamp = new Date().toISOString();
+    let notified = 0;
+
+    for (const entry of entries) {
+        if (entry.token === joiningToken) continue;
+
+        const conn = activeConnections.get(entry.token);
+        if (conn && conn.ws.readyState === WebSocket.OPEN) {
+            conn.ws.send(JSON.stringify({
+                type: 'joined',
+                token: joiningToken,
+                channel: channelName,
+                timestamp
+            }));
+            notified++;
+        }
+    }
+
+    return notified;
+}
+
+// Notificar a los miembros restantes del canal que un token se despublicó
+function notifyChannelMembersOfLeave(leavingToken, channelName) {
+    const entries = publicChannels.get(channelName);
+    if (!entries) return 0;
+
+    const timestamp = new Date().toISOString();
+    let notified = 0;
+
+    for (const entry of entries) {
+        if (entry.token === leavingToken) continue;
+
+        const conn = activeConnections.get(entry.token);
+        if (conn && conn.ws.readyState === WebSocket.OPEN) {
+            conn.ws.send(JSON.stringify({
+                type: 'left',
+                token: leavingToken,
+                channel: channelName,
+                timestamp
+            }));
+            notified++;
+        }
+    }
+
+    return notified;
+}
+
+// Notificar a los miembros de cada canal donde el token estaba publicado
+// Devuelve el Set de tokens receptores notificados (para deduplicación con notifyPairedClients)
+function notifyChannelMembersOfDisconnect(disconnectedToken) {
+    const notified = new Set();
+    const timestamp = new Date().toISOString();
+
+    for (const [channelName, entries] of publicChannels) {
+        // ¿El token desconectado estaba publicado en este canal?
+        const isInChannel = entries.some(entry => entry.token === disconnectedToken);
+        if (!isInChannel) continue;
+
+        // Notificar a cada miembro restante del canal
+        for (const entry of entries) {
+            if (entry.token === disconnectedToken) continue;
+
+            const conn = activeConnections.get(entry.token);
+            if (conn && conn.ws.readyState === WebSocket.OPEN) {
+                conn.ws.send(JSON.stringify({
+                    type: 'disconnected',
+                    token: disconnectedToken,
+                    channel: channelName,
+                    timestamp
+                }));
+                notified.add(entry.token);
+            }
+        }
+    }
+
+    return notified;
 }
 
 // Remover par de conexión manualmente y notificar a ambas partes
@@ -462,7 +551,7 @@ wss.on('connection', (ws, req) => {
         timestamp: new Date().toISOString()
     }));
     
-    console.log(`Cliente conectado - Token: ${token}, IP: ${clientIp}. Total activos: ${activeConnections.size}`);
+    if (process.env.NODE_ENV !== 'test') console.log(`Cliente conectado - Token: ${token}, IP: ${clientIp}. Total activos: ${activeConnections.size}`);
     
     // Manejar mensajes recibidos
     ws.on('message', (data) => {
@@ -481,6 +570,9 @@ wss.on('connection', (ws, req) => {
                 return;
             } else if (message.type === 'list') {
                 handleListMessage(ws, message);
+                return;
+            } else if (message.type === 'channel_count') {
+                handleChannelCountMessage(ws, message);
                 return;
             } else if (message.type === 'disconnect') {
                 handleDisconnectMessage(ws, message);
@@ -608,20 +700,23 @@ wss.on('connection', (ws, req) => {
         
         // Agregar a la lista pública del canal
         addToPublicChannel(channelName, token);
-        
+
+        // Notificar a los demás miembros del canal
+        const notifiedJoin = notifyChannelMembersOfJoin(token, channelName);
+
         const response = {
             type: 'published',
             channel: channelName,
             data: channelData.data,
             timestamp: new Date().toISOString()
         };
-        
+
         // Incluir ID del mensaje original si existe
         applyMessageIds(response, message);
-        
+
         ws.send(JSON.stringify(response));
-        
-        console.log(`Cliente ${token} publicado en canal: ${channelName}`);
+
+        if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} publicado en canal: ${channelName}. Notificados ${notifiedJoin} miembros.`);
     }
     
     function handleUnpublishMessage(ws, message) {
@@ -641,27 +736,30 @@ wss.on('connection', (ws, req) => {
         }
         
         const channelName = validation.channelName;
-        
+
         // Remover de la lista pública del canal
         removeFromPublicChannel(channelName, token);
-        
+
+        // Notificar a los miembros restantes del canal
+        const notifiedLeave = notifyChannelMembersOfLeave(token, channelName);
+
         // Limpiar datos del canal en la conexión
         const conn = activeConnections.get(token);
         if (conn) {
             conn.channel = null;
             conn.channelData = null;
         }
-        
+
         const response = {
             type: 'unpublished',
             channel: channelName,
             timestamp: new Date().toISOString()
         };
-        
+
         applyMessageIds(response, message);
         ws.send(JSON.stringify(response));
-        
-        console.log(`Cliente ${token} despublicado del canal: ${channelName}`);
+
+        if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} despublicado del canal: ${channelName}. Notificados ${notifiedLeave} miembros.`);
     }
     
     function handleListMessage(ws, message) {
@@ -701,9 +799,36 @@ wss.on('connection', (ws, req) => {
         
         ws.send(JSON.stringify(response));
         
-        console.log(`Cliente ${token} solicitó lista del canal ${channelName}: ${tokens.length} tokens`);
+        if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} solicitó lista del canal ${channelName}: ${tokens.length} tokens`);
     }
     
+    function handleChannelCountMessage(ws, message) {
+        const channelName = message.channel;
+
+        if (typeof channelName !== 'string' || channelName.length === 0) {
+            const errorResponse = {
+                type: 'error',
+                error: 'channel requerido (string no vacío)'
+            };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+
+        const tokens = getChannelTokens(channelName);
+
+        const response = {
+            type: 'channel_count',
+            channel: channelName,
+            count: tokens.length,
+            maxEntries: MAX_CHANNEL_ENTRIES,
+            timestamp: new Date().toISOString()
+        };
+
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    }
+
     function handleDisconnectMessage(ws, message) {
         const targetToken = message.target;
         
@@ -765,7 +890,7 @@ wss.on('connection', (ws, req) => {
             
             ws.send(JSON.stringify(response));
             
-            console.log(`Cliente ${token} desconectó manualmente de ${targetToken}`);
+            if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} desconectó manualmente de ${targetToken}`);
         } else {
             const errorResponse = {
                 type: 'error',
@@ -782,19 +907,23 @@ wss.on('connection', (ws, req) => {
     // Manejar cierre de conexión
     ws.on('close', () => {
         if (token && activeConnections.has(token)) {
-            // Notificar a clientes pareados
-            const notifiedCount = notifyPairedClients(token);
-            
+            // Notificar primero a miembros de canal (mensaje incluye 'channel'),
+            // antes de removeFromAllPublicChannels para que aún estén las entradas.
+            const notifiedByChannels = notifyChannelMembersOfDisconnect(token);
+
+            // Notificar a pares restantes (deduplicando contra los ya notificados por canal)
+            const notifiedByPairs = notifyPairedClients(token, notifiedByChannels);
+
             // Remover de activeConnections
             activeConnections.delete(token);
-            
+
             // Liberar token inmediatamente
             tokenManager.releaseToken(token);
-            
+
             // Remover de todos los canales públicos inmediatamente
             removeFromAllPublicChannels(token);
-            
-            console.log(`Cliente desconectado - Token: ${token}. Notificados: ${notifiedCount} clientes. Total activos: ${activeConnections.size}`);
+
+            if (process.env.NODE_ENV !== 'test') console.log(`Cliente desconectado - Token: ${token}. Notificados: ${notifiedByChannels.size} por canal + ${notifiedByPairs} por par. Total activos: ${activeConnections.size}`);
         }
     });
     
@@ -804,34 +933,92 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-// Iniciar limpieza periódica de entradas expiradas en canales
-setInterval(() => {
-    cleanupExpiredChannelEntries();
-}, 60 * 1000); // Cada minuto
+// Handles de intervalos para poder limpiarlos en stop()
+let channelCleanupInterval = null;
+let tokenCleanupInterval = null;
 
-// Iniciar limpieza periódica de tokens inactivos (solo por seguridad)
-tokenManager.startCleanupInterval(5); // Cada 5 minutos
+/**
+ * Inicia el servidor en el puerto indicado.
+ * @param {number} [port] Puerto a usar. 0 = puerto asignado por el OS. Default: PORT del entorno.
+ * @returns {Promise<number>} Puerto efectivo en el que está escuchando.
+ */
+function start(port = Number(PORT)) {
+    return new Promise((resolve, reject) => {
+        channelCleanupInterval = setInterval(cleanupExpiredChannelEntries, 60 * 1000);
+        tokenCleanupInterval = tokenManager.startCleanupInterval(5);
 
-// Iniciar servidor
-const numericPort = Number(PORT);
-server.listen(numericPort, () => {
-    console.log(`=========================================`);
-    console.log(`🚀 Servidor WebSocket proxy simplificado iniciado`);
-    console.log(`📡 Puerto: ${numericPort}`);
-    console.log(`🌐 URL: ws://localhost:${numericPort}/`);
-    console.log(`📊 Total conexiones activas: 0`);
-    console.log(`=========================================`);
-    console.log(`⏰ ${new Date().toLocaleString()}`);
-    console.log(`=========================================`);
-}).on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-        console.error(`Error: El puerto ${numericPort} ya está en uso.`);
-        console.error(`   Puedes cambiar el puerto en el archivo .env o liberar el puerto.`);
-    } else {
-        console.error(`Error al iniciar servidor:`, err);
+        const onError = (err) => {
+            server.removeListener('error', onError);
+            reject(err);
+        };
+        server.on('error', onError);
+
+        server.listen(port, () => {
+            server.removeListener('error', onError);
+            const actualPort = server.address().port;
+            if (process.env.NODE_ENV !== 'test') {
+                console.log(`=========================================`);
+                console.log(`🚀 Servidor WebSocket proxy simplificado iniciado`);
+                console.log(`📡 Puerto: ${actualPort}`);
+                console.log(`🌐 URL: ws://localhost:${actualPort}/`);
+                console.log(`📊 Total conexiones activas: 0`);
+                console.log(`=========================================`);
+                console.log(`⏰ ${new Date().toLocaleString()}`);
+                console.log(`=========================================`);
+            }
+            resolve(actualPort);
+        });
+    });
+}
+
+/**
+ * Detiene el servidor: limpia intervalos, cierra todas las conexiones y resetea el estado.
+ * @returns {Promise<void>}
+ */
+function stop() {
+    if (channelCleanupInterval) {
+        clearInterval(channelCleanupInterval);
+        channelCleanupInterval = null;
     }
-    process.exit(1);
-});
+    if (tokenCleanupInterval) {
+        clearInterval(tokenCleanupInterval);
+        tokenCleanupInterval = null;
+    }
+
+    // Cerrar todas las conexiones de cliente
+    for (const [, conn] of activeConnections) {
+        try { conn.ws.terminate(); } catch (_) { /* noop */ }
+    }
+    activeConnections.clear();
+    publicChannels.clear();
+    connectionPairs.clear();
+
+    // Resetear tokenManager
+    for (const t of tokenManager.getAllActiveTokens()) {
+        tokenManager.releaseToken(t);
+    }
+
+    return new Promise((resolve) => {
+        wss.close(() => {
+            server.close(() => resolve());
+        });
+    });
+}
+
+// Auto-start solo cuando se ejecuta directamente (no cuando se importa desde tests)
+if (require.main === module) {
+    start().catch((err) => {
+        if (err.code === 'EADDRINUSE') {
+            console.error(`Error: El puerto ${Number(PORT)} ya está en uso.`);
+            console.error(`   Puedes cambiar el puerto en el archivo .env o liberar el puerto.`);
+        } else {
+            console.error(`Error al iniciar servidor:`, err);
+        }
+        process.exit(1);
+    });
+}
+
+module.exports = { start, stop, server, wss };
 
 // Manejo de cierre limpio
 process.on('SIGINT', () => {

@@ -131,8 +131,9 @@ class TokenManager {
     }
 
     // Iniciar intervalo de limpieza periódica (solo para tokens huérfanos)
+    // Devuelve el handle del interval para que el llamador pueda limpiarlo (clearInterval).
     startCleanupInterval(intervalMinutes = 5) {
-        setInterval(() => {
+        return setInterval(() => {
             const cleaned = this.cleanupInactiveTokens();
             if (cleaned > 0) {
                 console.log(`Limpieza automática: ${cleaned} tokens inactivos removidos`);

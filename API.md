@@ -160,6 +160,7 @@ Cada cliente puede publicarse en un canal a la vez. El canal debe seguir el nuev
 ```
 
 ### Listar tokens en canal
+Obtener los últimos 100 tokens no expirados en un canal. Requiere el bloque firmado.
 ```json
 {
   "type": "list",
@@ -173,6 +174,20 @@ Cada cliente puede publicarse en un canal a la vez. El canal debe seguir el nuev
   }
 }
 ```
+
+**Respuesta:**
+```json
+{
+  "type": "channel_list",
+  "channel": "nombre-del-canal",
+  "tokens": ["ABCD", "EFGH", "IJKL"],
+  "count": 3,
+  "maxEntries": 100,
+  "timestamp": "2026-03-01T04:33:38.141Z"
+}
+```
+
+Para obtener solo el conteo sin firmar el canal, usar `channel_count` (más abajo).
 
 ### Desconectar manualmente de otro cliente
 Remover manualmente un par de conexión y notificar a ambas partes.
@@ -201,11 +216,12 @@ Remover manualmente un par de conexión y notificar a ambas partes.
 }
 ```
 
-### Listar tokens en canal
-Obtener los últimos 100 tokens no expirados en un canal.
+### Contar miembros en canal (consulta ligera, sin firma)
+Obtener solo el número de tokens activos en un canal, sin tener que firmar el bloque completo del canal. Útil para badges de presencia y polling barato.
+
 ```json
 {
-  "type": "list",
+  "type": "channel_count",
   "channel": "nombre-del-canal"
 }
 ```
@@ -213,24 +229,68 @@ Obtener los últimos 100 tokens no expirados en un canal.
 **Respuesta:**
 ```json
 {
-  "type": "channel_list",
+  "type": "channel_count",
   "channel": "nombre-del-canal",
-  "tokens": ["ABCD", "EFGH", "IJKL"],
   "count": 3,
   "maxEntries": 100,
   "timestamp": "2026-03-01T04:33:38.141Z"
 }
 ```
 
-### Notificación de desconexión
-Cuando un cliente con el que te has comunicado se desconecta (automáticamente o manualmente):
+Si el canal no existe o está vacío, `count` es `0`. Acepta `id` / `messageId` y los echoa en la respuesta. A diferencia de `list`, **no** requiere validación de firma porque solo expone un entero.
+
+### Notificación de entrada al canal (`joined`)
+Cuando un cliente hace `publish` exitoso en un canal, el servidor emite `joined` a todos los demás miembros publicados en ese canal:
 ```json
 {
-  "type": "disconnected",
+  "type": "joined",
   "token": "ABCD",
-  "timestamp": "2026-03-01T04:33:38.141Z"
+  "channel": "nombre-del-canal",
+  "timestamp": "2026-05-01T12:00:00.000Z"
 }
 ```
+
+- El propio publicador **no** recibe este evento (recibe `published` como confirmación).
+- Si el cliente re-publica en el mismo canal (ej. actualizando data), el servidor emite `joined` nuevamente — el receptor decide si lo trata como upsert o lo ignora.
+
+### Notificación de salida del canal (`left`)
+Cuando un cliente hace `unpublish` exitoso en un canal, el servidor emite `left` a los miembros restantes:
+```json
+{
+  "type": "left",
+  "token": "ABCD",
+  "channel": "nombre-del-canal",
+  "timestamp": "2026-05-01T12:00:00.000Z"
+}
+```
+
+- El propio cliente que sale **no** recibe este evento (recibe `unpublished` como confirmación).
+- Si el cliente cierra el WebSocket sin `unpublish`, **no** se emite `left`; en su lugar se emite `disconnected` (ver siguiente sección).
+
+### Notificación de desconexión
+Cuando un cliente se desconecta, el servidor emite el evento `disconnected` a:
+
+1. **Cada miembro de cada canal** en el que el cliente desconectado estaba publicado. En ese caso el evento incluye el campo `channel`:
+   ```json
+   {
+     "type": "disconnected",
+     "token": "ABCD",
+     "channel": "nombre-del-canal",
+     "timestamp": "2026-03-01T04:33:38.141Z"
+   }
+   ```
+   Si el cliente estaba publicado en N canales con receptores distintos, cada receptor recibe un evento por canal compartido (con su `channel` correspondiente).
+
+2. **Pares emparejados que no fueron alcanzados por canal** (clientes con los que se intercambiaron mensajes pero sin canal en común). En este caso el evento **no** incluye `channel`:
+   ```json
+   {
+     "type": "disconnected",
+     "token": "ABCD",
+     "timestamp": "2026-03-01T04:33:38.141Z"
+   }
+   ```
+
+La desconexión manual vía `{type:"disconnect", target}` solo emite la forma sin `channel` a las dos partes del par, ya que se trata de cortar un par específico, no de cerrar la conexión completa.
 
 ### Errores
 ```json
