@@ -151,6 +151,18 @@ Forma legacy (par sin canal compartido o `disconnect` manual):
 }
 ```
 
+### Listar canales activos (descubrimiento)
+```json
+{
+  "type": "channels_list",
+  "channels": [
+    { "name": "chat_room_general", "count": 3 },
+    { "name": "chat_room_prueba", "count": 1 }
+  ],
+  "timestamp": "2026-05-01T12:00:00.000Z"
+}
+```
+
 ### Conteo de canal (consulta ligera)
 ```json
 {

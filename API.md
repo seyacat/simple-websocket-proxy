@@ -216,6 +216,31 @@ Remover manualmente un par de conexión y notificar a ambas partes.
 }
 ```
 
+### Listar canales activos (descubrimiento, sin firma)
+Devuelve todos los canales con al menos un token publicado, junto con su `count`. Útil para descubrir salas creadas dinámicamente. Acepta un `prefix` opcional para filtrar.
+
+**Solicitud:**
+```json
+{ "type": "list_channels", "prefix": "chat_room_" }
+```
+
+**Respuesta:**
+```json
+{
+  "type": "channels_list",
+  "prefix": "chat_room_",
+  "channels": [
+    { "name": "chat_room_general", "count": 3 },
+    { "name": "chat_room_prueba", "count": 1 }
+  ],
+  "timestamp": "2026-05-01T12:00:00.000Z"
+}
+```
+
+- Sin `prefix` devuelve todos los canales (campo `prefix` se omite en la respuesta).
+- Acepta `id` / `messageId` y los echoa.
+- No requiere firma.
+
 ### Contar miembros en canal (consulta ligera, sin firma)
 Obtener solo el número de tokens activos en un canal, sin tener que firmar el bloque completo del canal. Útil para badges de presencia y polling barato.
 

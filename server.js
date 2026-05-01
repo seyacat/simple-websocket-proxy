@@ -574,6 +574,9 @@ wss.on('connection', (ws, req) => {
             } else if (message.type === 'channel_count') {
                 handleChannelCountMessage(ws, message);
                 return;
+            } else if (message.type === 'list_channels') {
+                handleListChannelsMessage(ws, message);
+                return;
             } else if (message.type === 'disconnect') {
                 handleDisconnectMessage(ws, message);
                 return;
@@ -802,6 +805,30 @@ wss.on('connection', (ws, req) => {
         if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} solicitó lista del canal ${channelName}: ${tokens.length} tokens`);
     }
     
+    function handleListChannelsMessage(ws, message) {
+        const prefix = (typeof message.prefix === 'string') ? message.prefix : null;
+        const now = Date.now();
+        const channels = [];
+
+        for (const [name, entries] of publicChannels) {
+            if (prefix && !name.startsWith(prefix)) continue;
+            const validCount = entries.filter(e => now - e.publishedAt < CHANNEL_ENTRY_EXPIRY_MS).length;
+            if (validCount > 0) {
+                channels.push({ name, count: validCount });
+            }
+        }
+
+        const response = {
+            type: 'channels_list',
+            channels,
+            timestamp: new Date().toISOString()
+        };
+
+        if (prefix !== null) response.prefix = prefix;
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    }
+
     function handleChannelCountMessage(ws, message) {
         const channelName = message.channel;
 

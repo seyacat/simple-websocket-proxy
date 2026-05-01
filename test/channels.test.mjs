@@ -160,6 +160,70 @@ describe('channels: publish / unpublish / list / channel_count', () => {
         });
     });
 
+    describe('list_channels', () => {
+        it('lista todos los canales con count > 0', async () => {
+            const a = await connect();
+            const b = await connect();
+
+            a.send({ type: 'publish', channel: makeMockChannel('chat_room_general') });
+            await a.waitFor((m) => m.type === 'published');
+
+            b.send({ type: 'publish', channel: makeMockChannel('chat_room_prueba') });
+            await b.waitFor((m) => m.type === 'published');
+
+            const c = await connect();
+            c.send({ type: 'list_channels' });
+            const res = await c.waitFor((m) => m.type === 'channels_list');
+
+            const names = res.channels.map(ch => ch.name);
+            expect(names).toContain('chat_room_general');
+            expect(names).toContain('chat_room_prueba');
+
+            const general = res.channels.find(ch => ch.name === 'chat_room_general');
+            const prueba = res.channels.find(ch => ch.name === 'chat_room_prueba');
+            expect(general.count).toBe(1);
+            expect(prueba.count).toBe(1);
+        });
+
+        it('filtra por prefix y echoa el prefix en la respuesta', async () => {
+            const a = await connect();
+            const b = await connect();
+
+            a.send({ type: 'publish', channel: makeMockChannel('chat_room_general') });
+            await a.waitFor((m) => m.type === 'published');
+            b.send({ type: 'publish', channel: makeMockChannel('other_namespace') });
+            await b.waitFor((m) => m.type === 'published');
+
+            const c = await connect();
+            c.send({ type: 'list_channels', prefix: 'chat_room_' });
+            const res = await c.waitFor((m) => m.type === 'channels_list');
+
+            expect(res.prefix).toBe('chat_room_');
+            const names = res.channels.map(ch => ch.name);
+            expect(names).toContain('chat_room_general');
+            expect(names).not.toContain('other_namespace');
+        });
+
+        it('omite canales vacíos', async () => {
+            const a = await connect();
+            a.send({ type: 'publish', channel: makeMockChannel('chat_room_temp') });
+            await a.waitFor((m) => m.type === 'published');
+            a.send({ type: 'unpublish', channel: makeMockChannel('chat_room_temp') });
+            await a.waitFor((m) => m.type === 'unpublished');
+
+            a.send({ type: 'list_channels', prefix: 'chat_room_temp' });
+            const res = await a.waitFor((m) => m.type === 'channels_list');
+            expect(res.channels).toEqual([]);
+        });
+
+        it('echoes id', async () => {
+            const a = await connect();
+            a.send({ type: 'list_channels', id: 11 });
+            const res = await a.waitFor((m) => m.type === 'channels_list');
+            expect(res.id).toBe(11);
+        });
+    });
+
     describe('unpublish', () => {
         it('quita el token del canal', async () => {
             const a = await connect();
