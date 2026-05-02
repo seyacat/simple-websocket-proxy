@@ -247,6 +247,65 @@ npm run test:watch  # modo watch
 
 Los tests arrancan su propia instancia del servidor en un puerto OS-asignado, no requieren un servidor corriendo aparte.
 
+## Rate limiting
+
+Hay dos niveles, ambos por **token + tipo de operación**, configurables por env. Defaults:
+
+| Tipo | Soft burst | Soft refill/s | Hard burst (×2) | Hard refill/s |
+|---|---:|---:|---:|---:|
+| `message` (regular) | 20 | 8 | 40 | 16 |
+| `publish` | 5 | 1 | 10 | 2 |
+| `unpublish` | 5 | 1 | 10 | 2 |
+| `list` | 10 | 2 | 20 | 4 |
+| `list_channels` | 5 | 1 | 10 | 2 |
+| `channel_count` | 60 | 10 | 120 | 20 |
+| `disconnect` | 5 | 1 | 10 | 2 |
+| **global por token** | 60 | 15 | 120 | 30 |
+
+### Tier 1 (soft) — abuse_notice
+
+Cuando un token excede el soft, **el mensaje se procesa igual** pero el proxy emite:
+
+```json
+{
+  "type": "abuse_notice",
+  "from": "ABCD",
+  "operation": "message",
+  "severity": "soft",
+  "timestamp": "..."
+}
+```
+
+- Para `message`: el notice va a cada **destinatario** del mensaje original; ellos pueden registrar el incidente para penalizar el ranking del emisor.
+- Para tipos especiales: el notice vuelve al **emisor** como aviso informativo.
+
+### Tier 2 (hard) — error + close + ban IP
+
+Cuando un token excede el hard (default 2× soft), el mensaje se rechaza y se cierra la conexión:
+
+```json
+{
+  "type": "error",
+  "error": "Hard rate limit exceeded for message",
+  "retry_after_ms": 1800000,
+  "limit_level": "hard",
+  "limit_type": "per_type",
+  "operation": "message"
+}
+```
+
+La IP queda baneada por `RATE_LIMIT_BAN_MS` (default 30 min). Conexiones nuevas desde esa IP se cierran inmediatamente con un error de tipo `ip_ban`.
+
+### Configuración por env
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `RATE_LIMIT_DISABLED` | — | Si es `1`, desactiva todo (útil en dev). |
+| `RATE_LIMIT_<TYPE>_BURST` | ver tabla | Capacidad del cubo soft para `<TYPE>` (`MESSAGE`, `PUBLISH`, `UNPUBLISH`, `LIST`, `LIST_CHANNELS`, `CHANNEL_COUNT`, `DISCONNECT`, `GLOBAL`). |
+| `RATE_LIMIT_<TYPE>_RATE` | ver tabla | Refill/s del cubo soft para `<TYPE>`. |
+| `RATE_LIMIT_HARD_MULTIPLIER` | `2` | Factor del hard sobre el soft. |
+| `RATE_LIMIT_BAN_MS` | `1800000` | Duración del ban por IP en ms. |
+
 ## Reglas del Sistema
 
 ### Tokens

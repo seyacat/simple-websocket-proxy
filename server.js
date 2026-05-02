@@ -2,6 +2,7 @@ require('dotenv').config();
 const http = require('http');
 const WebSocket = require('ws');
 const tokenManager = require('./tokenManager');
+const { createRateLimiter } = require('./rateLimiter');
 const crypto = require('crypto');
 
 // Configuración
@@ -305,6 +306,42 @@ function applyMessageIds(response, message) {
 }
 
 /**
+ * Emitir abuse_notice ante una violación de soft-limit.
+ *
+ * Para 'message' (mensaje regular): se notifica a cada destino válido en
+ *   `originalMessage.to`, así el receptor puede penalizar localmente al emisor.
+ * Para tipos especiales (publish/list/etc.): el "afectado" es el proxy, así
+ *   que la notificación vuelve al propio emisor como aviso informativo.
+ */
+function emitAbuseNotice(senderToken, operation, originalMessage) {
+    const notice = {
+        type: 'abuse_notice',
+        from: senderToken,
+        operation,
+        severity: 'soft',
+        timestamp: new Date().toISOString()
+    };
+
+    if (operation === 'message' && originalMessage && originalMessage.to) {
+        const targets = Array.isArray(originalMessage.to) ? originalMessage.to : [originalMessage.to];
+        for (const targetToken of targets) {
+            if (targetToken === senderToken) continue;
+            const targetConn = activeConnections.get(targetToken);
+            if (targetConn && targetConn.ws.readyState === WebSocket.OPEN) {
+                try { targetConn.ws.send(JSON.stringify(notice)); } catch (_) {}
+            }
+        }
+        return;
+    }
+
+    // Tipos especiales: notice al propio emisor.
+    const senderConn = activeConnections.get(senderToken);
+    if (senderConn && senderConn.ws.readyState === WebSocket.OPEN) {
+        try { senderConn.ws.send(JSON.stringify(notice)); } catch (_) {}
+    }
+}
+
+/**
  * Validar formato de canal según nueva especificación
  * Formato esperado: {data: {name: "channelName", publickey: "pubkey", ...}, signature: "datasignature"}
  * @param {Object} channelData - Objeto de canal a validar
@@ -525,10 +562,29 @@ const server = http.createServer((req, res) => {
 // Crear servidor WebSocket adjunto al servidor HTTP
 const wss = new WebSocket.Server({ server });
 
+// Rate limiter (puede ser noop si RATE_LIMIT_DISABLED=1)
+let rateLimiter = createRateLimiter();
+
 wss.on('connection', (ws, req) => {
     // Obtener IP del cliente
     const clientIp = req.socket.remoteAddress || '0.0.0.0';
-    
+
+    // Rechazar conexiones desde IPs baneadas
+    if (rateLimiter.isIpBanned(clientIp)) {
+        const remaining = rateLimiter.banRemainingMs(clientIp);
+        try {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: 'IP banned',
+                retry_after_ms: remaining,
+                limit_level: 'hard',
+                limit_type: 'ip_ban'
+            }));
+        } catch (_) {}
+        ws.close(1008, 'IP banned');
+        return;
+    }
+
     // Asignar token corto al cliente
     const token = tokenManager.assignToken(ws, clientIp);
     
@@ -557,10 +613,34 @@ wss.on('connection', (ws, req) => {
     ws.on('message', (data) => {
         try {
             const message = JSON.parse(data.toString());
-            
+
             // Actualizar actividad del token
             tokenManager.updateTokenActivity(token);
-            
+
+            // Rate limiting (per-token + per-type, dos niveles)
+            const messageType = message.type || 'message';
+            const rateCheck = rateLimiter.consume(token, clientIp, messageType);
+            if (rateCheck.status === 'hard_limit') {
+                rateLimiter.banIp(clientIp);
+                const banRemaining = rateLimiter.banRemainingMs(clientIp);
+                const errorResponse = {
+                    type: 'error',
+                    error: `Hard rate limit exceeded for ${messageType}`,
+                    retry_after_ms: banRemaining,
+                    limit_level: 'hard',
+                    limit_type: rateCheck.limit_type,
+                    operation: messageType
+                };
+                applyMessageIds(errorResponse, message);
+                try { ws.send(JSON.stringify(errorResponse)); } catch (_) {}
+                ws.close(1008, 'Rate limit hard violation');
+                return;
+            }
+            if (rateCheck.status === 'soft_limit') {
+                emitAbuseNotice(token, messageType, message);
+                // No return: el mensaje sigue procesándose
+            }
+
             // Manejar mensajes de tipo especial (publish, unpublish, list, disconnect)
             if (message.type === 'publish') {
                 handlePublishMessage(ws, message);
@@ -947,6 +1027,9 @@ wss.on('connection', (ws, req) => {
             // Liberar token inmediatamente
             tokenManager.releaseToken(token);
 
+            // Liberar el estado del rate limiter para este token
+            rateLimiter.releaseToken(token);
+
             // Remover de todos los canales públicos inmediatamente
             removeFromAllPublicChannels(token);
 
@@ -1025,6 +1108,12 @@ function stop() {
         tokenManager.releaseToken(t);
     }
 
+    // Reset rate limiter (drops in-memory state, allows tests to start fresh)
+    if (rateLimiter && typeof rateLimiter.destroy === 'function') {
+        rateLimiter.destroy();
+    }
+    rateLimiter = createRateLimiter();
+
     return new Promise((resolve) => {
         wss.close(() => {
             server.close(() => resolve());
@@ -1045,7 +1134,17 @@ if (require.main === module) {
     });
 }
 
-module.exports = { start, stop, server, wss };
+/**
+ * Reemplazar el rate limiter activo (utilidad para tests con configuración custom).
+ */
+function setRateLimiter(newLimiter) {
+    if (rateLimiter && typeof rateLimiter.destroy === 'function') rateLimiter.destroy();
+    rateLimiter = newLimiter;
+}
+
+function getRateLimiter() { return rateLimiter; }
+
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter };
 
 // Manejo de cierre limpio
 process.on('SIGINT', () => {
