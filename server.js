@@ -31,8 +31,13 @@ const CHANNEL_ENTRY_EXPIRY_MS = 20 * 60 * 1000; // 20 minutos
 //
 // Estado en memoria (sin disco). Tope global para no crecer sin límite.
 
-const pubkeyToToken = new Map();    // publickey JWK string -> token actual
-const tokenToPubkey = new Map();    // token -> publickey JWK string
+// Una pubkey puede estar identificada simultáneamente desde varias
+// conexiones (multi-instancia: web + extensión, dos pestañas, móvil...);
+// los mensajes online se hacen fan-out a todos los tokens activos.
+// La cola offline sigue siendo 1 sola por pubkey: el primer cliente que
+// identifique drena la cola completa y se borra (los demás no la verán).
+const pubkeyToTokens = new Map();   // publickey JWK string -> Set<token>
+const tokenToPubkey = new Map();    // token -> publickey JWK string (1:1)
 const offlineQueues = new Map();    // publickey -> array<QueuedMsg>
 
 const OFFLINE_TTL_MS = 24 * 60 * 60 * 1000;          // 1 día
@@ -130,11 +135,21 @@ function cleanupOfflineQueues() {
     }
 }
 
+function bindPubkey(publickey, token) {
+    if (!pubkeyToTokens.has(publickey)) pubkeyToTokens.set(publickey, new Set());
+    pubkeyToTokens.get(publickey).add(token);
+    tokenToPubkey.set(token, publickey);
+}
+
 function unbindPubkeyFromToken(token) {
     const pk = tokenToPubkey.get(token);
     if (!pk) return;
     tokenToPubkey.delete(token);
-    if (pubkeyToToken.get(pk) === token) pubkeyToToken.delete(pk);
+    const set = pubkeyToTokens.get(pk);
+    if (set) {
+        set.delete(token);
+        if (set.size === 0) pubkeyToTokens.delete(pk);
+    }
 }
 
 // Función para ordenar tokens y crear clave de par
@@ -1183,17 +1198,24 @@ wss.on('connection', (ws, req) => {
                 ws.send(JSON.stringify(errorResponse));
                 return;
             }
-            // Bind: cualquier mapping anterior con esta pubkey se reemplaza.
-            const prevToken = pubkeyToToken.get(data.publickey);
-            if (prevToken && prevToken !== ws.token) tokenToPubkey.delete(prevToken);
-            // Cualquier mapping anterior de este token se reemplaza también.
+            // Si este token estaba bound a OTRA pubkey, lo soltamos primero.
             const prevPub = tokenToPubkey.get(ws.token);
-            if (prevPub && prevPub !== data.publickey) pubkeyToToken.delete(prevPub);
+            if (prevPub && prevPub !== data.publickey) {
+                const oldSet = pubkeyToTokens.get(prevPub);
+                if (oldSet) {
+                    oldSet.delete(ws.token);
+                    if (oldSet.size === 0) pubkeyToTokens.delete(prevPub);
+                }
+            }
+            // Una pubkey puede estar simultáneamente en varios tokens: añadimos
+            // a la set en lugar de reemplazar. Solo el primero drena la cola
+            // offline; las siguientes instancias no reciben nada antiguo.
+            const wasFirstInstance =
+                !pubkeyToTokens.has(data.publickey) ||
+                pubkeyToTokens.get(data.publickey).size === 0;
+            bindPubkey(data.publickey, ws.token);
 
-            pubkeyToToken.set(data.publickey, ws.token);
-            tokenToPubkey.set(ws.token, data.publickey);
-
-            const delivered = flushOfflineFor(data.publickey, ws);
+            const delivered = wasFirstInstance ? flushOfflineFor(data.publickey, ws) : 0;
             const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
@@ -1214,26 +1236,40 @@ wss.on('connection', (ws, req) => {
         const sentInline = [];
         const queued = [];
         const failed = [];
+        let totalDeliveries = 0;
         for (const pk of targetPubkeys) {
             if (!pk || typeof pk !== 'string') { failed.push(pk); continue; }
             // Self?
             if (senderPubkey && pk === senderPubkey) { failed.push(pk); continue; }
-            const targetToken = pubkeyToToken.get(pk);
-            const targetConn  = targetToken ? activeConnections.get(targetToken) : null;
-            if (targetConn) {
-                try {
-                    targetConn.ws.send(JSON.stringify({
-                        type: 'message',
-                        from: ws.token,
-                        from_publickey: senderPubkey,
-                        message: message.message
-                    }));
-                    const pairKey = createPairKey(ws.token, targetToken);
-                    connectionPairs.add(pairKey);
-                    sentInline.push(pk);
-                } catch (_) { failed.push(pk); }
+            const targetTokens = pubkeyToTokens.get(pk);  // Set or undefined
+            // Filtrar tokens cuyo ws siga vivo (no debería haber zombies, pero por si acaso).
+            const liveConns = [];
+            if (targetTokens) {
+                for (const t of targetTokens) {
+                    const conn = activeConnections.get(t);
+                    if (conn) liveConns.push({ token: t, conn });
+                }
+            }
+            if (liveConns.length > 0) {
+                let anySent = false;
+                // Fan-out: una entrega por cada instancia activa de la pubkey.
+                for (const { token: targetToken, conn } of liveConns) {
+                    try {
+                        conn.ws.send(JSON.stringify({
+                            type: 'message',
+                            from: ws.token,
+                            from_publickey: senderPubkey,
+                            message: message.message
+                        }));
+                        connectionPairs.add(createPairKey(ws.token, targetToken));
+                        anySent = true;
+                        totalDeliveries++;
+                    } catch (_) { /* skip esa instancia, intenta las demás */ }
+                }
+                if (anySent) sentInline.push(pk);
+                else failed.push(pk);
             } else {
-                // Cola offline (24h)
+                // Sin instancias activas: cola offline (24h, single-drain)
                 const bytes = bytesOfMessage(message.message);
                 enqueueOffline(pk, {
                     from: ws.token,
@@ -1246,11 +1282,11 @@ wss.on('connection', (ws, req) => {
                 queued.push(pk);
             }
         }
-        // Notificar al remitente solo si hubo encolado o fallos
         if (queued.length || failed.length) {
             const response = {
                 type: 'message_sent',
                 sent: sentInline.length,
+                deliveries: totalDeliveries,  // entregas reales tras fan-out
                 queued: queued,
                 failed: failed
             };
