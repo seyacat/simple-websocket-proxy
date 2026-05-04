@@ -20,6 +20,123 @@ const publicChannels = new Map();
 const MAX_CHANNEL_ENTRIES = 100;
 const CHANNEL_ENTRY_EXPIRY_MS = 20 * 60 * 1000; // 20 minutos
 
+// ----- Identidad opt-in y cola offline ----------------------------------
+//
+// Un cliente puede llamar a `identify` enviando un sobre firmado
+// `{ op:'identify', token, ts }`. Eso enlaza su pubkey ECDSA con la
+// conexión actual. Una vez identificado, otros clientes pueden direccionar
+// mensajes por pubkey usando `to_publickey: [pk]`. Si el destinatario está
+// online, se entrega de inmediato; si no, el mensaje queda encolado hasta
+// 24h y se entrega cuando el destinatario vuelva a identificarse.
+//
+// Estado en memoria (sin disco). Tope global para no crecer sin límite.
+
+const pubkeyToToken = new Map();    // publickey JWK string -> token actual
+const tokenToPubkey = new Map();    // token -> publickey JWK string
+const offlineQueues = new Map();    // publickey -> array<QueuedMsg>
+
+const OFFLINE_TTL_MS = 24 * 60 * 60 * 1000;          // 1 día
+const IDENTIFY_TS_TOLERANCE_MS = 5 * 60 * 1000;       // ±5 min
+const MAX_QUEUE_PER_PUBKEY = 200;                     // mensajes
+const MAX_BYTES_PER_PUBKEY = 1 * 1024 * 1024;         // 1 MB por destinatario
+const MAX_TOTAL_QUEUE_BYTES = 64 * 1024 * 1024;       // 64 MB totales
+let totalQueueBytes = 0;
+
+function bytesOfMessage(m) {
+    try { return Buffer.byteLength(typeof m === 'string' ? m : JSON.stringify(m), 'utf8'); }
+    catch (_) { return 0; }
+}
+
+function trimQueueByCaps(pubkey) {
+    const q = offlineQueues.get(pubkey);
+    if (!q) return;
+    while (q.length > MAX_QUEUE_PER_PUBKEY) {
+        const dropped = q.shift();
+        totalQueueBytes -= dropped.bytes || 0;
+    }
+    let bytes = q.reduce((a, x) => a + (x.bytes || 0), 0);
+    while (bytes > MAX_BYTES_PER_PUBKEY && q.length) {
+        const dropped = q.shift();
+        bytes -= dropped.bytes || 0;
+        totalQueueBytes -= dropped.bytes || 0;
+    }
+    if (q.length === 0) offlineQueues.delete(pubkey);
+}
+
+function evictGloballyIfOverCap() {
+    if (totalQueueBytes <= MAX_TOTAL_QUEUE_BYTES) return;
+    // Encuentra entradas más viejas a través de todas las colas y descarta
+    // hasta volver bajo el límite.
+    while (totalQueueBytes > MAX_TOTAL_QUEUE_BYTES) {
+        let oldestPk = null;
+        let oldestTs = Infinity;
+        for (const [pk, q] of offlineQueues) {
+            if (q.length && q[0].queuedAt < oldestTs) {
+                oldestTs = q[0].queuedAt;
+                oldestPk = pk;
+            }
+        }
+        if (!oldestPk) break;
+        const dropped = offlineQueues.get(oldestPk).shift();
+        totalQueueBytes -= dropped.bytes || 0;
+        if (offlineQueues.get(oldestPk).length === 0) offlineQueues.delete(oldestPk);
+    }
+}
+
+function enqueueOffline(recipientPubkey, queued) {
+    if (!offlineQueues.has(recipientPubkey)) offlineQueues.set(recipientPubkey, []);
+    offlineQueues.get(recipientPubkey).push(queued);
+    totalQueueBytes += queued.bytes || 0;
+    trimQueueByCaps(recipientPubkey);
+    evictGloballyIfOverCap();
+}
+
+function flushOfflineFor(pubkey, ws) {
+    const q = offlineQueues.get(pubkey);
+    if (!q || q.length === 0) return 0;
+    const now = Date.now();
+    let delivered = 0;
+    for (const item of q) {
+        if (item.expiresAt < now) continue;
+        try {
+            ws.send(JSON.stringify({
+                type: 'message',
+                from: item.from,
+                from_publickey: item.fromPubkey || null,
+                message: item.message,
+                queued: true,
+                queued_at: new Date(item.queuedAt).toISOString()
+            }));
+            delivered++;
+        } catch (_) { /* ws not writable, give up — keep queue for next time */
+            return delivered;
+        }
+        totalQueueBytes -= item.bytes || 0;
+    }
+    offlineQueues.delete(pubkey);
+    return delivered;
+}
+
+function cleanupOfflineQueues() {
+    const now = Date.now();
+    for (const [pk, q] of Array.from(offlineQueues.entries())) {
+        let i = 0;
+        while (i < q.length && q[i].expiresAt < now) {
+            totalQueueBytes -= q[i].bytes || 0;
+            i++;
+        }
+        if (i > 0) q.splice(0, i);
+        if (q.length === 0) offlineQueues.delete(pk);
+    }
+}
+
+function unbindPubkeyFromToken(token) {
+    const pk = tokenToPubkey.get(token);
+    if (!pk) return;
+    tokenToPubkey.delete(token);
+    if (pubkeyToToken.get(pk) === token) pubkeyToToken.delete(pk);
+}
+
 // Función para ordenar tokens y crear clave de par
 function createPairKey(token1, token2) {
     return token1 < token2 ? `${token1}:${token2}` : `${token2}:${token1}`;
@@ -660,22 +777,34 @@ wss.on('connection', (ws, req) => {
             } else if (message.type === 'disconnect') {
                 handleDisconnectMessage(ws, message);
                 return;
-            }
-            
-            // Mensaje regular (to + message)
-            if (!message.to || !message.message) {
-                const errorResponse = {
-                    type: 'error',
-                    error: 'Formato de mensaje inválido. Debe contener "to" y "message" o "type" para operaciones especiales'
-                };
-                
-                // Incluir ID del mensaje original si existe
-                applyMessageIds(errorResponse, message);
-                
-                ws.send(JSON.stringify(errorResponse));
+            } else if (message.type === 'identify') {
+                handleIdentifyMessage(ws, message);
                 return;
             }
             
+            // Mensaje regular (to + message) o (to_publickey + message)
+            const hasTokenTo  = message.to        != null;
+            const hasPubkeyTo = message.to_publickey != null;
+            if ((!hasTokenTo && !hasPubkeyTo) || !message.message) {
+                const errorResponse = {
+                    type: 'error',
+                    error: 'Formato de mensaje inválido. Debe contener "to" o "to_publickey" y "message", o "type" para operaciones especiales'
+                };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+
+            // ----- Direccionamiento por publickey (entrega offline 24h) -----
+            if (hasPubkeyTo) {
+                const targetPubkeys = Array.isArray(message.to_publickey)
+                    ? message.to_publickey
+                    : [message.to_publickey];
+                handlePubkeyAddressedMessage(ws, message, targetPubkeys);
+                if (!hasTokenTo) return; // si solo era pubkey-addressed, terminamos
+            }
+
+            if (!hasTokenTo) return;
             // Validar que 'to' sea un array
             const targetTokens = Array.isArray(message.to) ? message.to : [message.to];
             
@@ -1011,6 +1140,125 @@ wss.on('connection', (ws, req) => {
         }
     }
     
+    // ----- identify y direccionamiento por pubkey -----------------------
+
+    function handleIdentifyMessage(ws, message) {
+        try {
+            const data = message.data;
+            const sig  = message.signature;
+            if (!data || !sig || data.op !== 'identify' || !data.publickey || !data.token || !data.ts) {
+                const errorResponse = {
+                    type: 'error',
+                    error: 'Formato identify inválido (esperado data:{op:"identify",publickey,token,ts}+signature)'
+                };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+            const skew = Math.abs(Date.now() - Number(data.ts));
+            if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
+                const errorResponse = { type: 'error', error: 'identify ts fuera de la ventana ±5min' };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+            if (data.token !== ws.token) {
+                const errorResponse = { type: 'error', error: 'identify.token no coincide con la conexión' };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+            let pubKeyJwk;
+            try { pubKeyJwk = JSON.parse(data.publickey); }
+            catch (_) {
+                const errorResponse = { type: 'error', error: 'identify.publickey debe ser JWK serializado' };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+            const ok = verifySignatureWithJWK(data, sig, pubKeyJwk);
+            if (!ok) {
+                const errorResponse = { type: 'error', error: 'Firma identify inválida' };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+            // Bind: cualquier mapping anterior con esta pubkey se reemplaza.
+            const prevToken = pubkeyToToken.get(data.publickey);
+            if (prevToken && prevToken !== ws.token) tokenToPubkey.delete(prevToken);
+            // Cualquier mapping anterior de este token se reemplaza también.
+            const prevPub = tokenToPubkey.get(ws.token);
+            if (prevPub && prevPub !== data.publickey) pubkeyToToken.delete(prevPub);
+
+            pubkeyToToken.set(data.publickey, ws.token);
+            tokenToPubkey.set(ws.token, data.publickey);
+
+            const delivered = flushOfflineFor(data.publickey, ws);
+            const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered };
+            applyMessageIds(response, message);
+            ws.send(JSON.stringify(response));
+        } catch (e) {
+            console.error('handleIdentifyMessage error:', e);
+            try {
+                const errorResponse = { type: 'error', error: 'Error interno en identify' };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+            } catch (_) {}
+        }
+    }
+
+    function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
+        const senderPubkey = tokenToPubkey.get(ws.token) || null;
+        const now = Date.now();
+        const expiresAt = now + OFFLINE_TTL_MS;
+        const sentInline = [];
+        const queued = [];
+        const failed = [];
+        for (const pk of targetPubkeys) {
+            if (!pk || typeof pk !== 'string') { failed.push(pk); continue; }
+            // Self?
+            if (senderPubkey && pk === senderPubkey) { failed.push(pk); continue; }
+            const targetToken = pubkeyToToken.get(pk);
+            const targetConn  = targetToken ? activeConnections.get(targetToken) : null;
+            if (targetConn) {
+                try {
+                    targetConn.ws.send(JSON.stringify({
+                        type: 'message',
+                        from: ws.token,
+                        from_publickey: senderPubkey,
+                        message: message.message
+                    }));
+                    const pairKey = createPairKey(ws.token, targetToken);
+                    connectionPairs.add(pairKey);
+                    sentInline.push(pk);
+                } catch (_) { failed.push(pk); }
+            } else {
+                // Cola offline (24h)
+                const bytes = bytesOfMessage(message.message);
+                enqueueOffline(pk, {
+                    from: ws.token,
+                    fromPubkey: senderPubkey,
+                    message: message.message,
+                    queuedAt: now,
+                    expiresAt,
+                    bytes
+                });
+                queued.push(pk);
+            }
+        }
+        // Notificar al remitente solo si hubo encolado o fallos
+        if (queued.length || failed.length) {
+            const response = {
+                type: 'message_sent',
+                sent: sentInline.length,
+                queued: queued,
+                failed: failed
+            };
+            applyMessageIds(response, message);
+            try { ws.send(JSON.stringify(response)); } catch (_) {}
+        }
+    }
+
     // Manejar cierre de conexión
     ws.on('close', () => {
         if (token && activeConnections.has(token)) {
@@ -1023,6 +1271,11 @@ wss.on('connection', (ws, req) => {
 
             // Remover de activeConnections
             activeConnections.delete(token);
+
+            // Soltar binding pubkey<->token (los mensajes que lleguen ahora
+            // por to_publickey caerán a la cola offline hasta que el cliente
+            // se reconecte e identifique de nuevo).
+            unbindPubkeyFromToken(token);
 
             // Liberar token inmediatamente
             tokenManager.releaseToken(token);
@@ -1046,6 +1299,7 @@ wss.on('connection', (ws, req) => {
 // Handles de intervalos para poder limpiarlos en stop()
 let channelCleanupInterval = null;
 let tokenCleanupInterval = null;
+let offlineQueueInterval = null;
 
 /**
  * Inicia el servidor en el puerto indicado.
@@ -1056,6 +1310,7 @@ function start(port = Number(PORT)) {
     return new Promise((resolve, reject) => {
         channelCleanupInterval = setInterval(cleanupExpiredChannelEntries, 60 * 1000);
         tokenCleanupInterval = tokenManager.startCleanupInterval(5);
+        offlineQueueInterval = setInterval(cleanupOfflineQueues, 60 * 1000);
 
         const onError = (err) => {
             server.removeListener('error', onError);
@@ -1089,6 +1344,10 @@ function stop() {
     if (channelCleanupInterval) {
         clearInterval(channelCleanupInterval);
         channelCleanupInterval = null;
+    }
+    if (offlineQueueInterval) {
+        clearInterval(offlineQueueInterval);
+        offlineQueueInterval = null;
     }
     if (tokenCleanupInterval) {
         clearInterval(tokenCleanupInterval);
