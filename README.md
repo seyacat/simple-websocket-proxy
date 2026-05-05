@@ -11,9 +11,13 @@ Un servidor WebSocket proxy que implementa las 4 reglas especificadas en `defini
 - **Tokens cortos alfanuméricos**: 4 caracteres (1-9, A-Z) asignados automáticamente
 - **Mensajería múltiple**: Envío a uno o varios destinos simultáneamente
 - **Notificaciones de desconexión**: Aviso cuando clientes pareados se desconectan
-- **Canales públicos**: Publicación y listado de tokens en canales
-- **Expiración automática**: Tokens en canales expiran después de 20 minutos
-- **Simple y minimalista**: Solo las funcionalidades requeridas
+- **Canales públicos**: Publicación y listado de tokens en canales (TTL 20 min, hard cap 100 tokens/canal)
+- **Identidad opt-in (`identify`)**: bind de una pubkey ECDSA estable al token actual mediante un sobre firmado.
+- **Direccionamiento por pubkey (`to_publickey`)**: una vez identificadas las partes, el sender direcciona por pubkey en lugar de token.
+- **Fan-out multi-instancia**: el proxy mantiene `pubkey → Set<token>` y entrega cada mensaje a todas las instancias activas de la misma pubkey (web + extensión + tabs + móvil simultáneamente).
+- **Cola offline 24 h**: si ninguna instancia de la pubkey está conectada, el mensaje queda en memoria hasta 24 h. Caps: 200 msgs / 1 MB por pubkey, 64 MB global con eviction oldest-first. **Single-drain**: el primer cliente que identifica drena la cola y se borra.
+- **Rate limit de dos niveles** por (token, type): soft → `abuse_notice` a los receptores, hard → cierre de conexión + ban de IP 30 min.
+- **Sin disco**: todo el estado vive en memoria del proceso.
 
 ## Instalación
 
