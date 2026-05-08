@@ -3,6 +3,8 @@ const http = require('http');
 const WebSocket = require('ws');
 const tokenManager = require('./tokenManager');
 const { createRateLimiter } = require('./rateLimiter');
+const { createUsageStats } = require('./usageStats');
+const usageStats = createUsageStats();
 const crypto = require('crypto');
 
 // Configuración
@@ -739,6 +741,7 @@ wss.on('connection', (ws, req) => {
         timestamp: new Date().toISOString()
     }));
     
+    usageStats.recordConnection(clientIp);
     if (process.env.NODE_ENV !== 'test') console.log(`Cliente conectado - Token: ${token}, IP: ${clientIp}. Total activos: ${activeConnections.size}`);
     
     // Manejar mensajes recibidos
@@ -752,23 +755,25 @@ wss.on('connection', (ws, req) => {
             // Rate limiting (per-token + per-type, dos niveles)
             const messageType = message.type || 'message';
             const rateCheck = rateLimiter.consume(token, clientIp, messageType);
+            usageStats.recordMessage(clientIp, messageType);
             if (rateCheck.status === 'hard_limit') {
-                rateLimiter.banIp(clientIp);
-                const banRemaining = rateLimiter.banRemainingMs(clientIp);
+                // Bans deshabilitados: en su lugar contamos en usageStats y
+                // rechazamos solo este mensaje. La conexión se mantiene viva.
+                usageStats.recordHardLimit(clientIp, messageType);
                 const errorResponse = {
                     type: 'error',
                     error: `Hard rate limit exceeded for ${messageType}`,
-                    retry_after_ms: banRemaining,
+                    retry_after_ms: rateCheck.retry_after_ms || 0,
                     limit_level: 'hard',
                     limit_type: rateCheck.limit_type,
                     operation: messageType
                 };
                 applyMessageIds(errorResponse, message);
                 try { ws.send(JSON.stringify(errorResponse)); } catch (_) {}
-                ws.close(1008, 'Rate limit hard violation');
                 return;
             }
             if (rateCheck.status === 'soft_limit') {
+                usageStats.recordSoftLimit(clientIp, messageType);
                 emitAbuseNotice(token, messageType, message);
                 // No return: el mensaje sigue procesándose
             }

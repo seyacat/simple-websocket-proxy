@@ -88,6 +88,12 @@ function createRateLimiter(options) {
       : process.env.RATE_LIMIT_BAN_MS != null ? process.env.RATE_LIMIT_BAN_MS
       : DEFAULT_BAN_MS, 10
   );
+  // Bans deshabilitados por defecto: en su lugar contamos eventos en
+  // un archivo de stats (USAGE_STATS_FILE) para revisar uso sospechoso
+  // sin cortar a usuarios reales.
+  const banDisabled = options.banDisabled != null
+    ? !!options.banDisabled
+    : process.env.RATE_LIMIT_BAN_DISABLED !== '0';
 
   const hardLimits = {};
   for (const k of Object.keys(softLimits)) {
@@ -134,7 +140,7 @@ function createRateLimiter(options) {
     if (!token) return { status: 'ok' };
     const now = Date.now();
 
-    if (ip && ipBans.has(ip) && ipBans.get(ip) > now) {
+    if (!banDisabled && ip && ipBans.has(ip) && ipBans.get(ip) > now) {
       return {
         status: 'hard_limit',
         retry_after_ms: ipBans.get(ip) - now,
@@ -166,7 +172,7 @@ function createRateLimiter(options) {
   function releaseToken(token) { tokens.delete(token); }
 
   function banIp(ip, ms) {
-    if (!ip) return;
+    if (!ip || banDisabled) return;
     ipBans.set(ip, Date.now() + (ms || banMs));
   }
 
